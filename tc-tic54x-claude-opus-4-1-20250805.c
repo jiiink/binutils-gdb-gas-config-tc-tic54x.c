@@ -250,16 +250,27 @@ static subsym_ent_t *subsym_lookup (char *, int);
 static char *subsym_substitute (char *, int);
 
 
-void
-md_show_usage (FILE *stream)
+void md_show_usage(FILE *stream)
 {
-  if (!stream) return;
-  
-  fprintf (stream, _("C54x-specific command line options:\n"));
-  fprintf (stream, _("-mfar-mode | -mf          Use extended addressing\n"));
-  fprintf (stream, _("-mcpu=<CPU version>       Specify the CPU version\n"));
-  fprintf (stream, _("-merrors-to-file <filename>\n"));
-  fprintf (stream, _("-me <filename>            Redirect errors to a file\n"));
+    if (stream == NULL) {
+        return;
+    }
+    
+    const char *messages[] = {
+        _("C54x-specific command line options:\n"),
+        _("-mfar-mode | -mf          Use extended addressing\n"),
+        _("-mcpu=<CPU version>       Specify the CPU version\n"),
+        _("-merrors-to-file <filename>\n"),
+        _("-me <filename>            Redirect errors to a file\n")
+    };
+    
+    size_t message_count = sizeof(messages) / sizeof(messages[0]);
+    
+    for (size_t i = 0; i < message_count; i++) {
+        if (fputs(messages[i], stream) == EOF) {
+            break;
+        }
+    }
 }
 
 /* Output a single character (upper octet is zero).  */
@@ -267,11 +278,10 @@ md_show_usage (FILE *stream)
 static void
 tic54x_emit_char (char c)
 {
-  expressionS expn;
+  expressionS expn = {0};
   
-  memset(&expn, 0, sizeof(expn));
   expn.X_op = O_constant;
-  expn.X_add_number = (unsigned char)c;
+  expn.X_add_number = c;
   emit_expr (&expn, 2);
 }
 
@@ -287,12 +297,14 @@ frag_prev (fragS *frag, segT seg)
     return NULL;
 
   seginfo = seg_info (seg);
-  if (!seginfo || !seginfo->frchainP)
+  if (!seginfo || !seginfo->frchainP || !seginfo->frchainP->frch_root)
     return NULL;
 
-  for (fragp = seginfo->frchainP->frch_root; fragp && fragp->fr_next; fragp = fragp->fr_next)
-    if (fragp->fr_next == frag)
-      return fragp;
+  for (fragp = seginfo->frchainP->frch_root; fragp; fragp = fragp->fr_next)
+    {
+      if (fragp->fr_next == frag)
+        return fragp;
+    }
 
   return NULL;
 }
@@ -315,19 +327,13 @@ bit_offset_frag (fragS *frag, segT seg)
 static int
 frag_bit_offset (fragS *frag, segT seg)
 {
-  if (!frag) {
-    return 0;
-  }
-
   frag = bit_offset_frag (frag, seg);
 
-  if (!frag) {
+  if (!frag)
     return 0;
-  }
 
-  if (frag->fr_opcode != NULL) {
+  if (frag->fr_opcode != NULL)
     return -1;
-  }
 
   return frag->tc_frag_data;
 }
@@ -335,22 +341,19 @@ frag_bit_offset (fragS *frag, segT seg)
 /* Read an expression from a C string; returns a pointer past the end of the
    expression.  */
 
-static char *
-parse_expression (char *str, expressionS *expn)
+static char *parse_expression(char *str, expressionS *expn)
 {
-  char *s;
-  char *tmp;
-
-  if (str == NULL || expn == NULL) {
-    return NULL;
-  }
-
-  tmp = input_line_pointer;
-  input_line_pointer = str;
-  expression (expn);
-  s = input_line_pointer;
-  input_line_pointer = tmp;
-  return s;
+    if (str == NULL || expn == NULL) {
+        return NULL;
+    }
+    
+    char *saved_line_pointer = input_line_pointer;
+    input_line_pointer = str;
+    expression(expn);
+    char *result = input_line_pointer;
+    input_line_pointer = saved_line_pointer;
+    
+    return result;
 }
 
 /* .asg "character-string"|character-string, symbol
@@ -362,12 +365,14 @@ parse_expression (char *str, expressionS *expn)
 static void
 tic54x_asg (int x ATTRIBUTE_UNUSED)
 {
-  int c;
   char *name = NULL;
   char *str = NULL;
-  int quoted = *input_line_pointer == '"';
+  int c;
+  int quoted;
 
   ILLEGAL_WITHIN_STRUCT ();
+
+  quoted = *input_line_pointer == '"';
 
   if (quoted)
     {
@@ -383,15 +388,15 @@ tic54x_asg (int x ATTRIBUTE_UNUSED)
   else
     {
       size_t len;
-      str = input_line_pointer;
-      while ((c = *input_line_pointer) != ',')
+      char *start = input_line_pointer;
+      
+      while ((c = *input_line_pointer) != ',' && !is_end_of_stmt (c))
         {
-          if (is_end_of_stmt (c))
-            break;
           ++input_line_pointer;
         }
-      len = input_line_pointer - str;
-      str = notes_memdup (str, len, len + 1);
+      
+      len = input_line_pointer - start;
+      str = notes_memdup (start, len, len + 1);
       if (!str)
         {
           ignore_rest_of_line ();
@@ -402,38 +407,42 @@ tic54x_asg (int x ATTRIBUTE_UNUSED)
   if (c != ',')
     {
       as_bad (_("Comma and symbol expected for '.asg STRING, SYMBOL'"));
-      goto cleanup;
+      notes_free (str);
+      ignore_rest_of_line ();
+      return;
     }
 
   ++input_line_pointer;
   c = get_symbol_name (&name);
-  if (!name)
+  if (!name || !*name)
     {
-      goto cleanup;
+      notes_free (str);
+      restore_line_pointer (c);
+      ignore_rest_of_line ();
+      return;
     }
+
   name = notes_strdup (name);
+  restore_line_pointer (c);
+
   if (!name)
     {
-      goto cleanup;
+      notes_free (str);
+      ignore_rest_of_line ();
+      return;
     }
-  (void) restore_line_pointer (c);
 
   if (!ISALPHA (*name))
     {
       as_bad (_("symbols assigned with .asg must begin with a letter"));
-      goto cleanup;
+      notes_free (str);
+      notes_free (name);
+      ignore_rest_of_line ();
+      return;
     }
 
   subsym_create_or_replace (name, str);
   demand_empty_rest_of_line ();
-  return;
-
-cleanup:
-  if (str)
-    notes_free (str);
-  if (name)
-    notes_free (name);
-  ignore_rest_of_line ();
 }
 
 /* .eval expression, symbol
@@ -454,15 +463,14 @@ tic54x_eval (int x ATTRIBUTE_UNUSED)
   int quoted;
 
   ILLEGAL_WITHIN_STRUCT ();
-
   SKIP_WHITESPACE ();
 
   quoted = (*input_line_pointer == '"');
   if (quoted)
     ++input_line_pointer;
-
+  
   value = get_absolute_expression ();
-
+  
   if (quoted)
     {
       if (*input_line_pointer != '"')
@@ -473,16 +481,16 @@ tic54x_eval (int x ATTRIBUTE_UNUSED)
         }
       ++input_line_pointer;
     }
-
+  
   if (*input_line_pointer++ != ',')
     {
       as_bad (_("Comma and symbol expected for '.eval EXPR, SYMBOL'"));
       ignore_rest_of_line ();
       return;
     }
-
+  
   c = get_symbol_name (&name);
-
+  
   if (!ISALPHA (*name))
     {
       as_bad (_("symbols assigned with .eval must begin with a letter"));
@@ -490,18 +498,18 @@ tic54x_eval (int x ATTRIBUTE_UNUSED)
       ignore_rest_of_line ();
       return;
     }
-
+  
   name = notes_strdup (name);
   restore_line_pointer (c);
-
+  
   symbolP = symbol_new (name, absolute_section, &zero_address_frag, value);
   SF_SET_LOCAL (symbolP);
   symbol_table_insert (symbolP);
-
-  sprintf (valuestr, "%d", value);
+  
+  snprintf (valuestr, sizeof(valuestr), "%d", value);
   tmp = notes_strdup (valuestr);
   subsym_create_or_replace (name, tmp);
-
+  
   demand_empty_rest_of_line ();
 }
 
@@ -539,7 +547,8 @@ tic54x_bss (int x ATTRIBUTE_UNUSED)
 
   c = get_symbol_name (&name);
   if (c == '"')
-    c = * ++ input_line_pointer;
+    c = *++input_line_pointer;
+  
   if (c != ',')
     {
       as_bad (_(".bss size argument missing\n"));
@@ -561,7 +570,7 @@ tic54x_bss (int x ATTRIBUTE_UNUSED)
       ++input_line_pointer;
       if (*input_line_pointer != ',')
         block = get_absolute_expression ();
-
+      
       if (*input_line_pointer == ',')
         {
           ++input_line_pointer;
@@ -607,56 +616,62 @@ stag_add_field_symbols (struct stag *stag,
   char *prefix;
   struct stag_field *field;
 
-  if (stag == NULL || path == NULL)
+  if (stag == NULL || stag->field == NULL)
     return;
 
   prefix = concat (path, *path ? "." : "", (const char *) NULL);
   if (prefix == NULL)
     return;
 
-  field = stag->field;
-  while (field != NULL)
+  for (field = stag->field; field != NULL; field = field->next)
     {
       char *name = concat (prefix, field->name, (const char *) NULL);
+      
       if (name == NULL)
         {
-          field = field->next;
-          continue;
+          free (prefix);
+          return;
         }
 
       if (rootsym == NULL)
 	{
-	  symbolS *sym = symbol_new (name, absolute_section, &zero_address_frag,
-			    (field->stag ? field->offset
-			     : base_offset + field->offset));
-	  SF_SET_LOCAL (sym);
-	  symbol_table_insert (sym);
+	  symbolS *sym;
+	  bfd_vma offset = field->stag ? field->offset : base_offset + field->offset;
+	  
+	  sym = symbol_new (name, absolute_section, &zero_address_frag, offset);
+	  if (sym != NULL)
+	    {
+	      SF_SET_LOCAL (sym);
+	      symbol_table_insert (sym);
+	    }
 	  free (name);
 	}
       else
 	{
 	  subsym_ent_t *ent = xmalloc (sizeof (*ent));
-          if (ent != NULL && root_stag_name != NULL)
-            {
-              ent->u.s = concat (S_GET_NAME (rootsym), "+", root_stag_name,
-                                 name + strlen (S_GET_NAME (rootsym)),
-                                 (const char *) NULL);
-              ent->freekey = 1;
-              ent->freeval = 1;
-              ent->isproc = 0;
-              ent->ismath = 0;
-              str_hash_insert (subsym_hash[0], name, ent, 0);
-            }
+	  if (ent != NULL)
+	    {
+	      const char *rootname = S_GET_NAME (rootsym);
+	      size_t rootlen = strlen (rootname);
+	      
+	      ent->u.s = concat (rootname, "+", root_stag_name,
+				 name + rootlen, (const char *) NULL);
+	      ent->freekey = 1;
+	      ent->freeval = 1;
+	      ent->isproc = 0;
+	      ent->ismath = 0;
+	      str_hash_insert (subsym_hash[0], name, ent, 0);
+	    }
+	  else
+	    {
+	      free (name);
+	    }
 	}
 
       if (field->stag != NULL)
 	stag_add_field_symbols (field->stag, name,
 				field->offset,
 				rootsym, root_stag_name);
-
-      field = field->next;
-      if (rootsym != NULL)
-        free (name);
     }
   free (prefix);
 }
@@ -671,45 +686,41 @@ stag_add_field (struct stag *parent,
 		struct stag *stag)
 {
   struct stag_field *sfield;
-  struct stag_field *sf;
-  symbolS *sym;
-
-  if (!parent || !name) {
+  struct stag_field **insertion_point;
+  
+  if (parent == NULL || name == NULL)
     return;
-  }
-
+    
   sfield = XCNEW (struct stag_field);
-  if (!sfield) {
+  if (sfield == NULL)
     return;
-  }
-
+    
   sfield->name = xstrdup (name);
-  if (!sfield->name) {
-    free (sfield);
-    return;
-  }
-
+  if (sfield->name == NULL)
+    {
+      free (sfield);
+      return;
+    }
+    
   sfield->offset = offset;
   sfield->bitfield_offset = parent->current_bitfield_offset;
   sfield->stag = stag;
-
-  if (parent->field == NULL) {
-    parent->field = sfield;
-  } else {
-    sf = parent->field;
-    while (sf->next != NULL) {
-      sf = sf->next;
+  sfield->next = NULL;
+  
+  insertion_point = &parent->field;
+  while (*insertion_point != NULL)
+    insertion_point = &(*insertion_point)->next;
+  *insertion_point = sfield;
+  
+  if (parent->name != NULL && startswith (parent->name, ".fake"))
+    {
+      symbolS *sym = symbol_new (name, absolute_section, &zero_address_frag, offset);
+      if (sym != NULL)
+        {
+          SF_SET_LOCAL (sym);
+          symbol_table_insert (sym);
+        }
     }
-    sf->next = sfield;
-  }
-
-  if (startswith (parent->name, ".fake")) {
-    sym = symbol_new (name, absolute_section, &zero_address_frag, offset);
-    if (sym) {
-      SF_SET_LOCAL (sym);
-      symbol_table_insert (sym);
-    }
-  }
 }
 
 /* [STAG] .struct       [OFFSET]
@@ -738,20 +749,18 @@ tic54x_struct (int arg)
       SKIP_WHITESPACE ();
       if (!is_end_of_stmt (*input_line_pointer))
         start_offset = get_absolute_expression ();
-      else
-        start_offset = 0;
     }
 
   if (current_stag)
     {
-      current_stag->inner = XCNEW (struct stag);
-      if (!current_stag->inner)
-        {
-          as_fatal (_("Memory allocation failed"));
-          return;
-        }
-      current_stag->inner->outer = current_stag;
-      current_stag = current_stag->inner;
+      struct stag *new_stag = XCNEW (struct stag);
+      if (!new_stag)
+        return;
+      
+      new_stag->outer = current_stag;
+      current_stag->inner = new_stag;
+      current_stag = new_stag;
+      
       if (start_offset)
         as_warn (_("Offset on nested structures is ignored"));
       start_offset = abs_section_offset;
@@ -760,18 +769,20 @@ tic54x_struct (int arg)
     {
       current_stag = XCNEW (struct stag);
       if (!current_stag)
-        {
-          as_fatal (_("Memory allocation failed"));
-          return;
-        }
+        return;
       abs_section_offset = start_offset;
     }
+  
   current_stag->is_union = is_union;
 
   if (line_label == NULL)
     {
       static int struct_count = 0;
       char fake[32];
+      
+      if (struct_count > 9999999)
+        struct_count = 0;
+      
       snprintf (fake, sizeof(fake), ".fake_stag%d", struct_count++);
       current_stag->sym = symbol_new (fake, absolute_section,
                                       &zero_address_frag,
@@ -779,23 +790,15 @@ tic54x_struct (int arg)
     }
   else
     {
-      char * label = xstrdup (S_GET_NAME (line_label));
+      char *label = xstrdup (S_GET_NAME (line_label));
       if (!label)
-        {
-          as_fatal (_("Memory allocation failed"));
-          return;
-        }
+        return;
+      
       current_stag->sym = symbol_new (label,
                                       absolute_section,
                                       &zero_address_frag,
                                       abs_section_offset);
       free (label);
-    }
-  
-  if (!current_stag->sym)
-    {
-      as_fatal (_("Symbol creation failed"));
-      return;
     }
   
   current_stag->name = S_GET_NAME (current_stag->sym);
@@ -814,18 +817,14 @@ tic54x_struct (int arg)
 static void
 tic54x_endstruct (int is_union)
 {
-  int size;
-  const char *path;
-  const char *struct_type = is_union ? "union" : "struct";
-
   if (!current_stag || current_stag->is_union != is_union)
     {
-      as_bad (_(".end%s without preceding .%s"), struct_type, struct_type);
+      as_bad (_(".end%s without preceding .%s"),
+              is_union ? "union" : "struct",
+              is_union ? "union" : "struct");
       ignore_rest_of_line ();
       return;
     }
-
-  path = startswith (current_stag->name, ".fake") ? "" : current_stag->name;
 
   if (current_stag->current_bitfield_offset)
     {
@@ -833,9 +832,9 @@ tic54x_endstruct (int is_union)
       current_stag->current_bitfield_offset = 0;
     }
 
-  size = current_stag->is_union ? 
-         current_stag->size : 
-         abs_section_offset - S_GET_VALUE (current_stag->sym);
+  int size = current_stag->is_union 
+    ? current_stag->size 
+    : abs_section_offset - S_GET_VALUE (current_stag->sym);
 
   if (line_label != NULL)
     {
@@ -849,19 +848,24 @@ tic54x_endstruct (int is_union)
 
   if (current_stag->outer == NULL)
     {
+      const char *path = startswith (current_stag->name, ".fake") 
+        ? "" 
+        : current_stag->name;
+      
       str_hash_insert (stag_hash, current_stag->name, current_stag, 0);
       stag_add_field_symbols (current_stag, path,
                               S_GET_VALUE (current_stag->sym),
                               NULL, NULL);
     }
 
+  struct stag *inner_stag = current_stag;
   current_stag = current_stag->outer;
 
   if (current_stag != NULL)
     {
-      stag_add_field (current_stag, current_stag->inner->name,
-                      S_GET_VALUE (current_stag->inner->sym),
-                      current_stag->inner);
+      stag_add_field (current_stag, inner_stag->name,
+                      S_GET_VALUE (inner_stag->sym),
+                      inner_stag);
     }
   else
     {
@@ -891,7 +895,7 @@ tic54x_tag (int ignore ATTRIBUTE_UNUSED)
       ignore_rest_of_line ();
       return;
     }
-  
+
   if (line_label == NULL)
     {
       as_bad (_("Label required for .tag"));
@@ -900,12 +904,7 @@ tic54x_tag (int ignore ATTRIBUTE_UNUSED)
     }
 
   char *label = xstrdup (S_GET_NAME (line_label));
-  if (!label)
-    {
-      ignore_rest_of_line ();
-      return;
-    }
-
+  
   if (current_stag != NULL)
     {
       stag_add_field (current_stag, label,
@@ -925,7 +924,7 @@ tic54x_tag (int ignore ATTRIBUTE_UNUSED)
       stag_add_field_symbols (stag, S_GET_NAME (sym),
 			      S_GET_VALUE (stag->sym), sym, stag->name);
     }
-
+  
   free (label);
 
   if (current_stag != NULL && !current_stag->is_union)
@@ -943,7 +942,7 @@ tic54x_tag (int ignore ATTRIBUTE_UNUSED)
 static void
 tic54x_struct_field (int type)
 {
-  unsigned int size = 0;
+  unsigned int size;
   int count = 1;
   int new_bitfield_offset = 0;
   int field_align = current_stag->current_bitfield_offset != 0;
@@ -979,32 +978,32 @@ tic54x_struct_field (int type)
     case '.':
       size = 0;
       if (count < 1 || count > 32)
-        {
-          as_bad (_(".field count '%d' out of range (1 <= X <= 32)"), count);
-          ignore_rest_of_line ();
-          return;
-        }
+	{
+	  as_bad (_(".field count '%d' out of range (1 <= X <= 32)"), count);
+	  ignore_rest_of_line ();
+	  return;
+	}
       if (current_stag->current_bitfield_offset + count > 16)
-        {
-          if (count == 32)
-            {
-              size = 2;
-              count = 1;
-            }
-          else if (count > 16)
-            {
-              size = 1;
-              count = 1;
-              new_bitfield_offset = count - 16;
-            }
-          else
-            new_bitfield_offset = count;
-        }
+	{
+	  if (count == 32)
+	    {
+	      size = 2;
+	      count = 1;
+	    }
+	  else if (count > 16)
+	    {
+	      size = 1;
+	      count = 1;
+	      new_bitfield_offset = count - 16;
+	    }
+	  else
+	    new_bitfield_offset = count;
+	}
       else
-        {
-          field_align = 0;
-          new_bitfield_offset = current_stag->current_bitfield_offset + count;
-        }
+	{
+	  field_align = 0;
+	  new_bitfield_offset = current_stag->current_bitfield_offset + count;
+	}
       break;
     default:
       as_bad (_("Unrecognized field type '%c'"), type);
@@ -1017,32 +1016,35 @@ tic54x_struct_field (int type)
       current_stag->current_bitfield_offset = 0;
       ++abs_section_offset;
     }
+  
   if (longword_align && (abs_section_offset & 0x1))
     ++abs_section_offset;
 
   if (line_label == NULL)
     {
       static int fieldno = 0;
-      char fake[20];
+      char fake[32];
 
       snprintf (fake, sizeof(fake), ".fake_field%d", fieldno++);
       stag_add_field (current_stag, fake,
-                      abs_section_offset - S_GET_VALUE (current_stag->sym),
-                      NULL);
+		      abs_section_offset - S_GET_VALUE (current_stag->sym),
+		      NULL);
     }
   else
     {
-      char * label = xstrdup (S_GET_NAME (line_label));
+      char * label;
+
+      label = xstrdup (S_GET_NAME (line_label));
       stag_add_field (current_stag, label,
-                      abs_section_offset - S_GET_VALUE (current_stag->sym),
-                      NULL);
+		      abs_section_offset - S_GET_VALUE (current_stag->sym),
+		      NULL);
       free (label);
     }
 
   if (current_stag->is_union)
     {
       if (current_stag->size < size * count)
-        current_stag->size = size * count;
+	current_stag->size = size * count;
     }
   else
     {
@@ -1057,9 +1059,6 @@ tic54x_struct_field (int type)
 static void
 tic54x_cons (int type)
 {
-  unsigned int c;
-  int octets;
-
   if (current_stag != NULL)
     {
       tic54x_struct_field (type);
@@ -1076,80 +1075,128 @@ tic54x_cons (int type)
     {
       frag_align (2, 0, 2);
       if (line_label != NULL)
-	{
-	  symbol_set_frag (line_label, frag_now);
-	  S_SET_VALUE (line_label, frag_now_fix ());
-	}
+        {
+          symbol_set_frag (line_label, frag_now);
+          S_SET_VALUE (line_label, frag_now_fix ());
+        }
     }
 
+  int octets = get_octets_for_type (type);
+  process_cons_data (octets);
+  demand_empty_rest_of_line ();
+}
+
+static int
+get_octets_for_type (int type)
+{
   switch (type)
     {
     case 'l':
     case 'L':
     case 'x':
-      octets = 4;
-      break;
+      return 4;
     case 'b':
     case 'B':
     case 'c':
     case 'C':
-      octets = 1;
-      break;
+      return 1;
     default:
-      octets = 2;
-      break;
+      return 2;
     }
+}
 
+static void
+process_cons_data (int octets)
+{
   do
     {
       if (*input_line_pointer == '"')
-	{
-	  input_line_pointer++;
-	  while (is_a_char (c = next_char_of_string ()))
-	    tic54x_emit_char (c);
-	  know (input_line_pointer[-1] == '\"');
-	}
+        {
+          process_string_literal ();
+        }
       else
-	{
-	  expressionS expn;
-
-	  input_line_pointer = parse_expression (input_line_pointer, &expn);
-	  if (expn.X_op == O_constant)
-	    {
-	      offsetT value = expn.X_add_number;
-	      if (octets == 1 && ((value > 0 && value > 0xFF) || (value < 0 && value < -0x100)))
-	        as_warn (_("Overflow in expression, truncated to 8 bits"));
-	      else if (octets == 2 && ((value > 0 && value > 0xFFFF) || (value < 0 && value < -0x10000)))
-	        as_warn (_("Overflow in expression, truncated to 16 bits"));
-	    }
-	  
-	  if (expn.X_op != O_constant && octets < 2)
-	    {
-	      as_bad (_("Relocatable values require at least WORD storage"));
-	      ignore_rest_of_line ();
-	      return;
-	    }
-
-	  if (expn.X_op != O_constant && amode == c_mode && octets == 4)
-	    {
-	      amode = far_mode;
-	      emitting_long = 1;
-	      emit_expr (&expn, 4);
-	      emitting_long = 0;
-	      amode = c_mode;
-	    }
-	  else
-	    {
-	      emitting_long = (octets == 4);
-	      emit_expr (&expn, (octets == 1) ? 2 : octets);
-	      emitting_long = 0;
-	    }
-	}
+        {
+          process_expression (octets);
+        }
     }
   while (*input_line_pointer++ == ',');
-
+  
   input_line_pointer--;
-  demand_empty_rest_of_line ();
+}
+
+static void
+process_string_literal (void)
+{
+  unsigned int c;
+  input_line_pointer++;
+  while (is_a_char (c = next_char_of_string ()))
+    {
+      tic54x_emit_char (c);
+    }
+  know (input_line_pointer[-1] == '\"');
+}
+
+static void
+process_expression (int octets)
+{
+  expressionS expn;
+  input_line_pointer = parse_expression (input_line_pointer, &expn);
+  
+  if (expn.X_op == O_constant)
+    {
+      check_overflow (expn.X_add_number, octets);
+    }
+  
+  if (expn.X_op != O_constant && octets < 2)
+    {
+      as_bad (_("Relocatable values require at least WORD storage"));
+      ignore_rest_of_line ();
+      return;
+    }
+  
+  emit_expression (&expn, octets);
+}
+
+static void
+check_overflow (offsetT value, int octets)
+{
+  switch (octets)
+    {
+    case 1:
+      if ((value > 0xFF) || (value < -0x100))
+        {
+          as_warn (_("Overflow in expression, truncated to 8 bits"));
+        }
+      break;
+    case 2:
+      if ((value > 0xFFFF) || (value < -0x10000))
+        {
+          as_warn (_("Overflow in expression, truncated to 16 bits"));
+        }
+      break;
+    default:
+      break;
+    }
+}
+
+static void
+emit_expression (expressionS *expn, int octets)
+{
+  if (expn->X_op != O_constant && amode == c_mode && octets == 4)
+    {
+      amode = far_mode;
+      emitting_long = 1;
+      emit_expr (expn, 4);
+      emitting_long = 0;
+      amode = c_mode;
+    }
+  else
+    {
+      int emit_size = (octets == 1) ? 2 : octets;
+      emitting_long = (octets == 4) ? 1 : 0;
+      emit_expr (expn, emit_size);
+      emitting_long = 0;
+    }
 }
 
 /* .global <symbol>[,...,<symbolN>]
@@ -1179,43 +1226,53 @@ tic54x_global (int type)
   symbolS *symbolP;
 
   if (type == 'r')
-    as_warn (_("Use of .def/.ref is deprecated.  Use .global instead"));
+    {
+      as_warn (_("Use of .def/.ref is deprecated.  Use .global instead"));
+    }
 
   ILLEGAL_WITHIN_STRUCT ();
 
   do
     {
       c = get_symbol_name (&name);
-      if (!name)
-        break;
+      if (name == NULL)
+        {
+          break;
+        }
       
       symbolP = symbol_find_or_make (name);
-      if (!symbolP)
-        break;
-        
+      if (symbolP == NULL)
+        {
+          c = restore_line_pointer (c);
+          break;
+        }
+      
       c = restore_line_pointer (c);
-
       S_SET_STORAGE_CLASS (symbolP, C_EXT);
-      if (c == ',')
-	{
-	  input_line_pointer++;
-	  if (is_end_of_stmt (*input_line_pointer))
-	    c = *input_line_pointer;
-	}
+      
+      if (c != ',')
+        {
+          break;
+        }
+      
+      input_line_pointer++;
+      if (is_end_of_stmt (*input_line_pointer))
+        {
+          break;
+        }
     }
-  while (c == ',');
+  while (1);
 
   demand_empty_rest_of_line ();
 }
 
-static void
-free_subsym_ent(void *ent)
+static void free_subsym_ent(void *ent)
 {
     if (ent == NULL) {
         return;
     }
     
-    string_tuple_t *tuple = (string_tuple_t *)ent;
+    string_tuple_t *tuple = ent;
     if (tuple->value == NULL) {
         free(ent);
         return;
@@ -1238,13 +1295,9 @@ free_subsym_ent(void *ent)
 static htab_t
 subsym_htab_create (void)
 {
-  htab_t htab = htab_create_alloc (16, hash_string_tuple, eq_string_tuple,
-                                   free_subsym_ent, xcalloc, free);
-  if (!htab)
-    {
-      return NULL;
-    }
-  return htab;
+  const size_t INITIAL_SIZE = 16;
+  return htab_create_alloc (INITIAL_SIZE, hash_string_tuple, eq_string_tuple,
+                            free_subsym_ent, xcalloc, free);
 }
 
 static void
@@ -1254,32 +1307,41 @@ free_local_label_ent (void *ent)
     return;
   }
   
-  string_tuple_t *tuple = (string_tuple_t *)ent;
-  free(tuple->key);
-  free(tuple->value);
-  free(ent);
+  string_tuple_t *tuple = ent;
+  
+  if (tuple->key != NULL) {
+    free ((void *) tuple->key);
+    tuple->key = NULL;
+  }
+  
+  if (tuple->value != NULL) {
+    free ((void *) tuple->value);
+    tuple->value = NULL;
+  }
+  
+  free (ent);
 }
 
 static htab_t
 local_label_htab_create (void)
 {
-  htab_t htab = htab_create_alloc (16, hash_string_tuple, eq_string_tuple,
-                                   free_local_label_ent, xcalloc, free);
-  if (htab == NULL) {
-    return NULL;
-  }
-  return htab;
+  const size_t INITIAL_SIZE = 16;
+  htab_t table = htab_create_alloc (INITIAL_SIZE, hash_string_tuple, eq_string_tuple,
+                                     free_local_label_ent, xcalloc, free);
+  if (table == NULL)
+    {
+      return NULL;
+    }
+  return table;
 }
 
 /* Reset all local labels.  */
 
-static void
-tic54x_clear_local_labels (int ignored ATTRIBUTE_UNUSED)
+static void tic54x_clear_local_labels(int ignored ATTRIBUTE_UNUSED)
 {
-  if (local_label_hash[macro_level] != NULL)
-  {
-    htab_empty (local_label_hash[macro_level]);
-  }
+    if (macro_level >= 0 && macro_level < sizeof(local_label_hash) / sizeof(local_label_hash[0]) && local_label_hash[macro_level] != NULL) {
+        htab_empty(local_label_hash[macro_level]);
+    }
 }
 
 /* .text
@@ -1298,12 +1360,7 @@ tic54x_clear_local_labels (int ignored ATTRIBUTE_UNUSED)
 static void
 tic54x_sect (int arg)
 {
-  const char *flags = ",\"w\"\n";
-  char *name = NULL;
-  int len;
-  
   ILLEGAL_WITHIN_STRUCT ();
-  
   tic54x_clear_local_labels (0);
 
   if (arg == 't')
@@ -1318,24 +1375,35 @@ tic54x_sect (int arg)
       return;
     }
 
+  char *name = NULL;
+  int len;
+  const char *flags = ",\"w\"\n";
+
   if (*input_line_pointer == '"')
     {
       name = demand_copy_C_string (&len);
+      if (name == NULL)
+        return;
       demand_empty_rest_of_line ();
     }
   else
     {
       int c = get_symbol_name (&name);
+      if (name == NULL)
+        return;
       (void) restore_line_pointer (c);
       demand_empty_rest_of_line ();
     }
 
-  if (name != NULL)
+  char *full_name = concat (name, flags, (char *) NULL);
+  if (full_name == NULL)
     {
-      char *section_name = concat (name, flags, (char *) NULL);
-      input_scrub_insert_line (section_name);
+      free (name);
+      return;
     }
-
+  
+  free (name);
+  input_scrub_insert_line (full_name);
   obj_coff_section (0);
 
   if (line_label != NULL)
@@ -1361,7 +1429,7 @@ tic54x_space (int arg)
   char *p = NULL;
   int octets = 0;
   long words;
-  int bits_per_byte = (OCTETS_PER_BYTE * 8);
+  int bits_per_byte = OCTETS_PER_BYTE * 8;
   int bit_offset = 0;
   symbolS *label = line_label;
   int bes = arg;
@@ -1377,17 +1445,13 @@ tic54x_space (int arg)
   if (expn.X_op != O_constant || frag_bit_offset (frag_now, now_seg) == -1)
     {
       struct bit_info *bi = XNEW (struct bit_info);
-      if (bi == NULL)
-        return;
-
       bi->seg = now_seg;
       bi->type = bes;
       bi->sym = label;
       p = frag_var (rs_machine_dependent, 65536 * 2, 1, 0,
                     make_expr_symbol (&expn), 0, (char *) bi);
-      if (p != NULL)
+      if (p)
         *p = 0;
-
       return;
     }
 
@@ -1395,7 +1459,6 @@ tic54x_space (int arg)
   if (bit_offset != 0 && bit_offset < 16)
     {
       int spare_bits = bits_per_byte - bit_offset;
-
       if (spare_bits >= expn.X_add_number)
         {
           if (label != NULL)
@@ -1416,16 +1479,20 @@ tic54x_space (int arg)
         }
     }
 
-  words = ((expn.X_add_number + bits_per_byte - 1) / bits_per_byte);
+  words = (expn.X_add_number + bits_per_byte - 1) / bits_per_byte;
   bit_offset = expn.X_add_number % bits_per_byte;
   octets = words * OCTETS_PER_BYTE;
 
-  if (octets <= 0)
+  if (octets < 0)
     {
-      if (octets < 0)
-        as_warn (_(".space/.bes repeat count is negative, ignored"));
-      else
-        as_warn (_(".space/.bes repeat count is zero, ignored"));
+      as_warn (_(".space/.bes repeat count is negative, ignored"));
+      demand_empty_rest_of_line ();
+      return;
+    }
+  
+  if (octets == 0)
+    {
+      as_warn (_(".space/.bes repeat count is zero, ignored"));
       demand_empty_rest_of_line ();
       return;
     }
@@ -1451,7 +1518,7 @@ tic54x_space (int arg)
       S_SET_VALUE (label, frag_now_fix () - 1);
     }
 
-  if (p != NULL)
+  if (p)
     *p = 0;
 
   demand_empty_rest_of_line ();
@@ -1475,7 +1542,9 @@ tic54x_usect (int x ATTRIBUTE_UNUSED)
   char *section_name;
   char *p;
   segT seg;
-  int size, blocking_flag, alignment_flag;
+  int size = 0;
+  int blocking_flag = 0;
+  int alignment_flag = 0;
   segT current_seg;
   subsegT current_subseg;
   flagword flags;
@@ -1486,21 +1555,7 @@ tic54x_usect (int x ATTRIBUTE_UNUSED)
   current_subseg = now_subseg;
 
   c = get_symbol_name (&section_name);
-  if (section_name == NULL)
-    {
-      as_bad (_("Invalid section name"));
-      ignore_rest_of_line ();
-      return;
-    }
-  
   name = xstrdup (section_name);
-  if (name == NULL)
-    {
-      as_bad (_("Memory allocation failed"));
-      ignore_rest_of_line ();
-      return;
-    }
-  
   c = restore_line_pointer (c);
   
   if (c != ',')
@@ -1513,9 +1568,6 @@ tic54x_usect (int x ATTRIBUTE_UNUSED)
 
   ++input_line_pointer;
   size = get_absolute_expression ();
-
-  blocking_flag = 0;
-  alignment_flag = 0;
 
   if (*input_line_pointer == ',')
     {
@@ -1531,6 +1583,13 @@ tic54x_usect (int x ATTRIBUTE_UNUSED)
     }
 
   seg = subseg_new (name, 0);
+  if (seg == NULL)
+    {
+      as_bad (_("Failed to create section \"%s\""), name);
+      free (name);
+      return;
+    }
+
   flags = bfd_section_flags (seg) | SEC_ALLOC;
 
   if (alignment_flag)
@@ -1551,7 +1610,8 @@ tic54x_usect (int x ATTRIBUTE_UNUSED)
   seg_info (seg)->bss = 1;
 
   p = frag_var (rs_fill, 1, 1, 0, line_label, size * OCTETS_PER_BYTE, NULL);
-  *p = 0;
+  if (p != NULL)
+    *p = 0;
 
   if (blocking_flag)
     flags |= SEC_TIC54X_BLOCK;
@@ -1560,57 +1620,65 @@ tic54x_usect (int x ATTRIBUTE_UNUSED)
     as_warn (_("Error setting flags for \"%s\": %s"), name,
              bfd_errmsg (bfd_get_error ()));
 
+  free (name);
   subseg_set (current_seg, current_subseg);
   demand_empty_rest_of_line ();
-  free (name);
 }
 
-static enum cpu_version
-lookup_version (const char *ver)
+static enum cpu_version lookup_version(const char *ver)
 {
-  enum cpu_version version = VNONE;
-  size_t len;
-
-  if (!ver)
-    return version;
-
-  len = strlen (ver);
-
-  if (len < 3 || ver[0] != '5' || ver[1] != '4')
-    return version;
-
-  if (len == 3)
-    {
-      char third_char = ver[2];
-      if (third_char == '1' || third_char == '2' || third_char == '3' ||
-          third_char == '5' || third_char == '8' || third_char == '9')
-        version = third_char - '0';
-    }
-  else if (len == 5 &&
-           TOUPPER (ver[3]) == 'L' &&
-           TOUPPER (ver[4]) == 'P' &&
-           (ver[2] == '5' || ver[2] == '6'))
-    {
-      version = ver[2] - '0' + 10;
+    if (ver == NULL) {
+        return VNONE;
     }
 
-  return version;
+    size_t len = strlen(ver);
+    
+    if (ver[0] != '5' || ver[1] != '4') {
+        return VNONE;
+    }
+
+    if (len == 3) {
+        switch (ver[2]) {
+            case '1': return V1;
+            case '2': return V2;
+            case '3': return V3;
+            case '5': return V5;
+            case '8': return V8;
+            case '9': return V9;
+            default: return VNONE;
+        }
+    }
+
+    if (len == 5 && TOUPPER(ver[3]) == 'L' && TOUPPER(ver[4]) == 'P') {
+        switch (ver[2]) {
+            case '5': return V15;
+            case '6': return V16;
+            default: return VNONE;
+        }
+    }
+
+    return VNONE;
 }
 
 static void
 set_cpu (enum cpu_version version)
 {
   cpu = version;
-  if (version == V545LP || version == V546LP)
+  
+  if (version != V545LP && version != V546LP)
     {
-      symbolS *symbolP = symbol_new ("__allow_lp", absolute_section,
-				     &zero_address_frag, 1);
-      if (symbolP != NULL)
-        {
-          SF_SET_LOCAL (symbolP);
-          symbol_table_insert (symbolP);
-        }
+      return;
     }
+    
+  symbolS *symbolP = symbol_new ("__allow_lp", absolute_section,
+                                 &zero_address_frag, 1);
+  if (symbolP == NULL)
+    {
+      return;
+    }
+    
+  SF_SET_LOCAL (symbolP);
+  symbol_table_insert (symbolP);
 }
 
 /* .version cpu-version
@@ -1630,22 +1698,20 @@ static int cpu_needs_set = 1;
 static void
 tic54x_version (int x ATTRIBUTE_UNUSED)
 {
-  enum cpu_version version = VNONE;
+  enum cpu_version version;
   enum cpu_version old_version = cpu;
   int c;
   char *ver;
 
   ILLEGAL_WITHIN_STRUCT ();
-
   SKIP_WHITESPACE ();
-  ver = input_line_pointer;
   
+  ver = input_line_pointer;
   while (!is_end_of_stmt (*input_line_pointer))
     ++input_line_pointer;
-    
+  
   c = *input_line_pointer;
   *input_line_pointer = 0;
-
   version = lookup_version (ver);
   *input_line_pointer = c;
 
@@ -1676,20 +1742,27 @@ static void
 tic54x_float_cons (int type)
 {
   if (current_stag != 0)
-    tic54x_struct_field ('f');
+    {
+      tic54x_struct_field ('f');
+      return;
+    }
 
 #ifdef md_flush_pending_output
   md_flush_pending_output ();
 #endif
 
-  if (type != 'x')
+  if (type == 'x')
     {
-      frag_align (2, 0, 2);
-      if (line_label != NULL)
-	{
-	  symbol_set_frag (line_label, frag_now);
-	  S_SET_VALUE (line_label, frag_now_fix ());
-	}
+      float_cons ('f');
+      return;
+    }
+
+  frag_align (2, 0, 2);
+  
+  if (line_label != NULL)
+    {
+      symbol_set_frag (line_label, frag_now);
+      S_SET_VALUE (line_label, frag_now_fix ());
     }
 
   float_cons ('f');
@@ -1718,77 +1791,119 @@ tic54x_stringer (int type)
   md_flush_pending_output ();
 #endif
 
-  c = ',';
-  while (c == ',')
+  do
     {
       SKIP_WHITESPACE ();
       
       if (*input_line_pointer == '\"')
         {
-          ++input_line_pointer;
-          while (is_a_char (c = next_char_of_string ()))
-            {
-              if (!packed)
-                {
-                  FRAG_APPEND_1_CHAR (c);
-                  FRAG_APPEND_1_CHAR (0);
-                }
-              else
-                {
-                  if (last_char == -1)
-                    {
-                      last_char = c;
-                    }
-                  else
-                    {
-                      FRAG_APPEND_1_CHAR (c);
-                      FRAG_APPEND_1_CHAR (last_char);
-                      last_char = -1;
-                    }
-                }
-            }
-          
-          if (append_zero)
-            {
-              if (packed && last_char != -1)
-                {
-                  FRAG_APPEND_1_CHAR (0);
-                  FRAG_APPEND_1_CHAR (last_char);
-                  last_char = -1;
-                }
-              else
-                {
-                  FRAG_APPEND_1_CHAR (0);
-                  FRAG_APPEND_1_CHAR (0);
-                }
-            }
-          know (input_line_pointer[-1] == '\"');
+          process_string (packed, append_zero, &last_char);
         }
       else
         {
-          unsigned short value = get_absolute_expression ();
-          FRAG_APPEND_1_CHAR ( value       & 0xFF);
-          FRAG_APPEND_1_CHAR ((value >> 8) & 0xFF);
+          process_expression ();
         }
       
       SKIP_WHITESPACE ();
       c = *input_line_pointer;
+      
       if (!is_end_of_stmt (c))
-        ++input_line_pointer;
+        {
+          ++input_line_pointer;
+        }
     }
+  while (c == ',');
 
+  finalize_packed_string (packed, last_char);
+  demand_empty_rest_of_line ();
+}
+
+static void
+process_string (int packed, int append_zero, int *last_char)
+{
+  unsigned int c;
+  
+  ++input_line_pointer;
+  
+  while (is_a_char (c = next_char_of_string ()))
+    {
+      if (!packed)
+        {
+          append_unpacked_char (c);
+        }
+      else
+        {
+          append_packed_char (c, last_char);
+        }
+    }
+  
+  if (append_zero)
+    {
+      append_terminator (packed, last_char);
+    }
+  
+  know (input_line_pointer[-1] == '\"');
+}
+
+static void
+process_expression (void)
+{
+  unsigned short value = get_absolute_expression ();
+  FRAG_APPEND_1_CHAR (value & 0xFF);
+  FRAG_APPEND_1_CHAR ((value >> 8) & 0xFF);
+}
+
+static void
+append_unpacked_char (unsigned int c)
+{
+  FRAG_APPEND_1_CHAR (c);
+  FRAG_APPEND_1_CHAR (0);
+}
+
+static void
+append_packed_char (unsigned int c, int *last_char)
+{
+  if (*last_char == -1)
+    {
+      *last_char = c;
+    }
+  else
+    {
+      FRAG_APPEND_1_CHAR (c);
+      FRAG_APPEND_1_CHAR (*last_char);
+      *last_char = -1;
+    }
+}
+
+static void
+append_terminator (int packed, int *last_char)
+{
+  if (packed && *last_char != -1)
+    {
+      FRAG_APPEND_1_CHAR (0);
+      FRAG_APPEND_1_CHAR (*last_char);
+      *last_char = -1;
+    }
+  else
+    {
+      FRAG_APPEND_1_CHAR (0);
+      FRAG_APPEND_1_CHAR (0);
+    }
+}
+
+static void
+finalize_packed_string (int packed, int last_char)
+{
   if (packed && last_char != -1)
     {
       FRAG_APPEND_1_CHAR (0);
       FRAG_APPEND_1_CHAR (last_char);
     }
-  demand_empty_rest_of_line ();
 }
 
 static void
-tic54x_p2align (int arg)
+tic54x_p2align (int arg ATTRIBUTE_UNUSED)
 {
-  (void)arg;
   as_bad (_("p2align not supported on this target"));
 }
 
@@ -1800,9 +1915,13 @@ tic54x_align_words (int arg)
   if (!is_end_of_stmt (*input_line_pointer))
     {
       if (arg == 2)
-        as_warn (_("Argument to .even ignored"));
+        {
+          as_warn (_("Argument to .even ignored"));
+        }
       else
-        count = get_absolute_expression ();
+        {
+          count = get_absolute_expression ();
+        }
     }
 
   if (current_stag != NULL && arg == 128)
@@ -1818,10 +1937,7 @@ tic54x_align_words (int arg)
 
   ILLEGAL_WITHIN_STRUCT ();
 
-  if (count >= 0)
-    {
-      s_align_bytes (count << 1);
-    }
+  s_align_bytes (count << 1);
 }
 
 /* Initialize multiple-bit fields within a single word of memory.  */
@@ -1831,8 +1947,6 @@ tic54x_field (int ignore ATTRIBUTE_UNUSED)
 {
   expressionS expn;
   int size = 16;
-  char *p;
-  valueT value;
   symbolS *label = line_label;
 
   if (current_stag != NULL)
@@ -1863,20 +1977,37 @@ tic54x_field (int ignore ATTRIBUTE_UNUSED)
           ignore_rest_of_line ();
           return;
         }
-
       frag_now->tc_frag_data = 0;
       emit_expr (&expn, 2);
-      demand_empty_rest_of_line ();
-      return;
+    }
+  else
+    {
+      process_constant_field (&expn, size, label);
     }
 
-  unsigned long fmask = (size == 32) ? 0xFFFFFFFF : (1ul << size) - 1;
-  value = expn.X_add_number;
-  expn.X_add_number &= fmask;
-  if (value != (valueT) expn.X_add_number)
-    as_warn (_("field value truncated"));
-  value = expn.X_add_number;
+  demand_empty_rest_of_line ();
+}
 
+static void
+process_constant_field (expressionS *expn, int size, symbolS *label)
+{
+  unsigned long fmask = (size == 32) ? 0xFFFFFFFF : (1ul << size) - 1;
+  valueT value = expn->X_add_number;
+  
+  expn->X_add_number &= fmask;
+  if (value != (valueT) expn->X_add_number)
+    as_warn (_("field value truncated"));
+  
+  value = expn->X_add_number;
+  
+  emit_field_bits (value, size, label);
+}
+
+static void
+emit_field_bits (valueT value, int size, symbolS *label)
+{
+  char *p;
+  
   while (size >= 16)
     {
       frag_now->tc_frag_data = 0;
@@ -1884,84 +2015,101 @@ tic54x_field (int ignore ATTRIBUTE_UNUSED)
       md_number_to_chars (p, (value >> (size - 16)) & 0xFFFF, 2);
       size -= 16;
     }
-
+  
   if (size > 0)
+    emit_partial_field (value, size, label);
+}
+
+static void
+emit_partial_field (valueT value, int size, symbolS *label)
+{
+  int bit_offset = frag_bit_offset (frag_now, now_seg);
+  fragS *alloc_frag = bit_offset_frag (frag_now, now_seg);
+  char *p;
+  
+  if (bit_offset == -1)
     {
-      int bit_offset = frag_bit_offset (frag_now, now_seg);
-      fragS *alloc_frag = bit_offset_frag (frag_now, now_seg);
-      
-      if (bit_offset == -1)
-        {
-          struct bit_info *bi = XNEW (struct bit_info);
-          if (bi == NULL)
-            {
-              as_bad (_("memory allocation failed"));
-              ignore_rest_of_line ();
-              return;
-            }
-
-          expressionS size_exp;
-          size_exp.X_op = O_constant;
-          size_exp.X_add_number = size;
-          bi->seg = now_seg;
-          bi->type = TYPE_FIELD;
-          bi->value = value;
-          p = frag_var (rs_machine_dependent, 4, 1, 0,
-                        make_expr_symbol (&size_exp), 0, (char *) bi);
-        }
-      else
-        {
-          if (bit_offset == 0 || bit_offset + size > 16)
-            {
-              p = frag_more (2);
-              frag_now->tc_frag_data = 0;
-              alloc_frag = frag_now;
-            }
-          else
-            {
-              p = alloc_frag == frag_now ?
-                  frag_now->fr_literal + frag_now_fix_octets () - 2 :
-                  alloc_frag->fr_literal;
-              if (label != NULL)
-                {
-                  symbol_set_frag (label, alloc_frag);
-                  if (alloc_frag == frag_now)
-                    S_SET_VALUE (label, frag_now_fix () - 1);
-                  label = NULL;
-                }
-            }
-          
-          value <<= 16 - alloc_frag->tc_frag_data - size;
-
-          if (alloc_frag->tc_frag_data)
-            value |= ((uint16_t) p[1] << 8) | p[0];
-          
-          md_number_to_chars (p, value, 2);
-          alloc_frag->tc_frag_data += size;
-          if (alloc_frag->tc_frag_data == 16)
-            alloc_frag->tc_frag_data = 0;
-        }
+      handle_unknown_offset (value, size);
+      return;
     }
   
-  demand_empty_rest_of_line ();
+  if (bit_offset == 0 || bit_offset + size > 16)
+    {
+      p = frag_more (2);
+      frag_now->tc_frag_data = 0;
+      alloc_frag = frag_now;
+    }
+  else
+    {
+      p = get_existing_field_buffer (alloc_frag, label);
+    }
+  
+  update_field_value (p, value, size, alloc_frag);
+}
+
+static void
+handle_unknown_offset (valueT value, int size)
+{
+  struct bit_info *bi = XNEW (struct bit_info);
+  expressionS size_exp;
+  
+  size_exp.X_op = O_constant;
+  size_exp.X_add_number = size;
+  bi->seg = now_seg;
+  bi->type = TYPE_FIELD;
+  bi->value = value;
+  
+  frag_var (rs_machine_dependent, 4, 1, 0,
+            make_expr_symbol (&size_exp), 0, (char *) bi);
+}
+
+static char *
+get_existing_field_buffer (fragS *alloc_frag, symbolS *label)
+{
+  char *p = (alloc_frag == frag_now) ?
+            frag_now->fr_literal + frag_now_fix_octets () - 2 :
+            alloc_frag->fr_literal;
+  
+  if (label != NULL)
+    {
+      symbol_set_frag (label, alloc_frag);
+      if (alloc_frag == frag_now)
+        S_SET_VALUE (label, frag_now_fix () - 1);
+    }
+  
+  return p;
+}
+
+static void
+update_field_value (char *p, valueT value, int size, fragS *alloc_frag)
+{
+  value <<= 16 - alloc_frag->tc_frag_data - size;
+  
+  if (alloc_frag->tc_frag_data)
+    value |= ((uint16_t) p[1] << 8) | p[0];
+  
+  md_number_to_chars (p, value, 2);
+  alloc_frag->tc_frag_data += size;
+  
+  if (alloc_frag->tc_frag_data == 16)
+    alloc_frag->tc_frag_data = 0;
 }
 
 /* Ideally, we want to check SEC_LOAD and SEC_HAS_CONTENTS, but those aren't
    available yet.  seg_info ()->bss is the next best thing.  */
 
-static int
-tic54x_initialized_section(segT seg)
+static int tic54x_initialized_section(segT seg)
 {
     if (seg == NULL) {
         return 0;
     }
     
-    segment_info_type *seg_info_ptr = seg_info(seg);
-    if (seg_info_ptr == NULL) {
+    segment_info_type *info = seg_info(seg);
+    if (info == NULL) {
         return 0;
     }
     
-    return !seg_info_ptr->bss;
+    return info->bss == 0;
 }
 
 /* .clink ["section name"]
@@ -1975,51 +2123,54 @@ static void
 tic54x_clink (int ignored ATTRIBUTE_UNUSED)
 {
   segT seg = now_seg;
-  char *section_name;
-  char *name;
+  char *section_name = NULL;
+  char *name = NULL;
 
   ILLEGAL_WITHIN_STRUCT ();
 
   if (*input_line_pointer == '\"')
     {
       section_name = ++input_line_pointer;
-
+      
       while (is_a_char (next_char_of_string ()))
         ;
       
-      if (input_line_pointer <= section_name || input_line_pointer[-1] != '\"')
+      if (input_line_pointer[-1] != '\"')
         {
-          as_bad (_("Unterminated string in section name"));
+          as_bad (_("Unterminated string in .clink directive"));
           ignore_rest_of_line ();
           return;
         }
       
       input_line_pointer[-1] = 0;
       name = xstrdup (section_name);
+      
+      if (name == NULL)
+        {
+          as_bad (_("Memory allocation failed"));
+          ignore_rest_of_line ();
+          return;
+        }
 
       seg = bfd_get_section_by_name (stdoutput, name);
+      free (name);
+      
       if (seg == NULL)
         {
           as_bad (_("Unrecognized section '%s'"), section_name);
-          free (name);
           ignore_rest_of_line ();
           return;
         }
-      free (name);
     }
-  else
+  else if (!tic54x_initialized_section (seg))
     {
-      if (!tic54x_initialized_section (seg))
-        {
-          as_bad (_("Current section is uninitialized, "
-                    "section name required for .clink"));
-          ignore_rest_of_line ();
-          return;
-        }
+      as_bad (_("Current section is uninitialized, "
+                "section name required for .clink"));
+      ignore_rest_of_line ();
+      return;
     }
 
   seg->flags |= SEC_TIC54X_CLINK;
-
   demand_empty_rest_of_line ();
 }
 
@@ -2031,23 +2182,15 @@ tic54x_set_default_include (void)
 {
   unsigned lineno;
   const char *curfile = as_where (&lineno);
-  const char *tmp;
-  size_t len;
+  const char *tmp = strrchr (curfile, '/');
   
-  if (curfile == NULL)
-    {
-      include_dirs[0] = ".";
-      return;
-    }
-  
-  tmp = strrchr (curfile, '/');
   if (tmp == NULL)
     {
       include_dirs[0] = ".";
       return;
     }
   
-  len = tmp - curfile;
+  size_t len = tmp - curfile;
   if (len > include_dir_maxlen)
     include_dir_maxlen = len;
   include_dirs[0] = notes_memdup (curfile, len, len + 1);
@@ -2070,16 +2213,16 @@ tic54x_include (int ignored ATTRIBUTE_UNUSED)
   char newblock[] = " .newblock\n";
   char *filename = NULL;
   char *input = NULL;
-  int len;
-  char saved_char;
+  int len = 0;
 
   ILLEGAL_WITHIN_STRUCT ();
-
   SKIP_WHITESPACE ();
 
   if (*input_line_pointer == '"')
     {
       filename = demand_copy_C_string (&len);
+      if (filename == NULL)
+        return;
       demand_empty_rest_of_line ();
     }
   else
@@ -2088,37 +2231,39 @@ tic54x_include (int ignored ATTRIBUTE_UNUSED)
       while (!is_end_of_stmt (*input_line_pointer))
         ++input_line_pointer;
       
-      saved_char = *input_line_pointer;
-      *input_line_pointer = '\0';
-      filename = xstrdup (start);
-      *input_line_pointer = saved_char;
+      size_t name_len = input_line_pointer - start;
+      if (name_len == 0)
+        {
+          demand_empty_rest_of_line ();
+          return;
+        }
+      
+      filename = xmalloc (name_len + 1);
+      if (filename == NULL)
+        return;
+      
+      memcpy (filename, start, name_len);
+      filename[name_len] = '\0';
       demand_empty_rest_of_line ();
     }
-
-  if (filename == NULL)
-    return;
 
   input = concat ("\"", filename, "\"\n", newblock, (char *) NULL);
   if (input != NULL)
     {
       input_scrub_insert_line (input);
+      tic54x_clear_local_labels (0);
+      tic54x_set_default_include ();
+      s_include (0);
     }
-
-  tic54x_clear_local_labels (0);
-  tic54x_set_default_include ();
-  s_include (0);
-
-  if (filename != NULL && *input_line_pointer != '"')
-    {
-      free (filename);
-    }
+  
+  free (filename);
 }
 
 static void
 tic54x_message (int type)
 {
-  char *msg = NULL;
-  char c;
+  char *msg;
+  char saved_char;
   int len;
 
   ILLEGAL_WITHIN_STRUCT ();
@@ -2126,20 +2271,25 @@ tic54x_message (int type)
   if (*input_line_pointer == '"')
     {
       msg = demand_copy_C_string (&len);
+      if (msg == NULL)
+        {
+          as_bad ("Invalid string");
+          demand_empty_rest_of_line ();
+          return;
+        }
     }
   else
     {
       char *start = input_line_pointer;
       while (!is_end_of_stmt (*input_line_pointer))
-        ++input_line_pointer;
-      c = *input_line_pointer;
-      *input_line_pointer = 0;
+        {
+          ++input_line_pointer;
+        }
+      saved_char = *input_line_pointer;
+      *input_line_pointer = '\0';
       msg = xstrdup (start);
-      *input_line_pointer = c;
+      *input_line_pointer = saved_char;
     }
-
-  if (msg == NULL)
-    return;
 
   switch (type)
     {
@@ -2153,12 +2303,11 @@ tic54x_message (int type)
       as_bad ("%s", msg);
       break;
     default:
+      as_bad ("Invalid message type");
       break;
     }
 
-  if (*input_line_pointer != '"')
-    free (msg);
-
+  free (msg);
   demand_empty_rest_of_line ();
 }
 
@@ -2180,14 +2329,12 @@ tic54x_label (int ignored ATTRIBUTE_UNUSED)
   ILLEGAL_WITHIN_STRUCT ();
 
   c = get_symbol_name (&name);
-  if (name == NULL) {
+  if (name == NULL)
     return;
-  }
-  
+
   symbolP = colon (name);
-  if (symbolP != NULL) {
+  if (symbolP != NULL)
     S_SET_STORAGE_CLASS (symbolP, C_STATLAB);
-  }
 
   restore_line_pointer (c);
   demand_empty_rest_of_line ();
@@ -2201,22 +2348,24 @@ static void
 tic54x_register_mmregs (int ignored ATTRIBUTE_UNUSED)
 {
   const tic54x_symbol *sym;
-  symbolS *symbolP;
 
   ILLEGAL_WITHIN_STRUCT ();
 
-  if (!tic54x_mmregs) {
+  if (tic54x_mmregs == NULL)
     return;
-  }
 
-  for (sym = tic54x_mmregs; sym && sym->name; sym++)
+  for (sym = tic54x_mmregs; sym != NULL && sym->name != NULL; sym++)
     {
-      symbolP = symbol_new (sym->name, absolute_section,
-                           &zero_address_frag, sym->value);
-      if (symbolP) {
-        SF_SET_LOCAL (symbolP);
-        symbol_table_insert (symbolP);
-      }
+      if (sym->name[0] == '\0')
+        continue;
+
+      symbolS *symbolP = symbol_new (sym->name, absolute_section,
+                                    &zero_address_frag, sym->value);
+      if (symbolP == NULL)
+        continue;
+
+      SF_SET_LOCAL (symbolP);
+      symbol_table_insert (symbolP);
     }
 }
 
@@ -2232,12 +2381,14 @@ tic54x_loop (int count)
   if (!is_end_of_stmt (*input_line_pointer))
     {
       count = get_absolute_expression ();
-      if (count < 0)
-        count = 0;
     }
 
-  if (count >= 0)
-    do_repeat ((size_t) count, "LOOP", "ENDLOOP", NULL);
+  if (count < 0)
+    {
+      count = 0;
+    }
+
+  do_repeat ((size_t) count, "LOOP", "ENDLOOP", NULL);
 }
 
 /* Normally, endloop gets eaten by the preceding loop.  */
@@ -2255,15 +2406,21 @@ static void
 tic54x_break (int ignore ATTRIBUTE_UNUSED)
 {
   int cond = 1;
+  int is_substitution;
 
   ILLEGAL_WITHIN_STRUCT ();
 
   SKIP_WHITESPACE ();
   if (!is_end_of_stmt (*input_line_pointer))
-    cond = get_absolute_expression ();
+    {
+      cond = get_absolute_expression ();
+    }
 
-  if (cond)
-    end_repeat (substitution_line ? 1 : 0);
+  if (cond != 0)
+    {
+      is_substitution = (substitution_line != 0) ? 1 : 0;
+      end_repeat (is_substitution);
+    }
 }
 
 static void
@@ -2272,16 +2429,21 @@ set_address_mode (int mode)
   symbolS *symbolP;
   
   amode = mode;
-  if (mode == far_mode)
+  
+  if (mode != far_mode)
     {
-      symbolP = symbol_new ("__allow_far", absolute_section,
-                           &zero_address_frag, 1);
-      if (symbolP != NULL)
-        {
-          SF_SET_LOCAL (symbolP);
-          symbol_table_insert (symbolP);
-        }
+      return;
     }
+    
+  symbolP = symbol_new ("__allow_far", absolute_section,
+                        &zero_address_frag, 1);
+  if (symbolP == NULL)
+    {
+      return;
+    }
+    
+  SF_SET_LOCAL (symbolP);
+  symbol_table_insert (symbolP);
 }
 
 static int address_mode_needs_set = 1;
@@ -2296,21 +2458,18 @@ tic54x_address_mode (int mode)
       return;
     }
   
-  if (mode == far_mode && !is_extended_addressing_supported())
+  if (mode == far_mode)
     {
-      as_bad (_("Extended addressing not supported on the specified CPU"));
-      ignore_rest_of_line ();
-      return;
+      if (cpu != VNONE && cpu != V548 && cpu != V549)
+        {
+          as_bad (_("Extended addressing not supported on the specified CPU"));
+          ignore_rest_of_line ();
+          return;
+        }
     }
 
   set_address_mode (mode);
   demand_empty_rest_of_line ();
-}
-
-static int
-is_extended_addressing_supported(void)
-{
-  return (cpu == VNONE || cpu == V548 || cpu == V549);
 }
 
 /* .sblock "section"|section [,...,"section"|section]
@@ -2319,59 +2478,58 @@ is_extended_addressing_supported(void)
 static void
 tic54x_sblock (int ignore ATTRIBUTE_UNUSED)
 {
-  int c = ',';
-
   ILLEGAL_WITHIN_STRUCT ();
 
-  while (c == ',')
+  do
     {
-      segT seg;
       char *name = NULL;
+      segT seg;
 
       if (*input_line_pointer == '"')
-	{
-	  int len;
-	  name = demand_copy_C_string (&len);
-	}
+        {
+          int len;
+          name = demand_copy_C_string (&len);
+        }
       else
-	{
-	  char *section_name;
-	  c = get_symbol_name (&section_name);
-	  name = xstrdup (section_name);
-	  (void) restore_line_pointer (c);
-	}
+        {
+          char *section_name;
+          int c = get_symbol_name (&section_name);
+          name = xstrdup (section_name);
+          (void) restore_line_pointer (c);
+        }
 
       if (name == NULL)
-	{
-	  as_bad (_("Invalid section name"));
-	  ignore_rest_of_line ();
-	  return;
-	}
+        {
+          ignore_rest_of_line ();
+          return;
+        }
 
       seg = bfd_get_section_by_name (stdoutput, name);
       if (seg == NULL)
-	{
-	  as_bad (_("Unrecognized section '%s'"), name);
-	  free (name);
-	  ignore_rest_of_line ();
-	  return;
-	}
+        {
+          as_bad (_("Unrecognized section '%s'"), name);
+          free (name);
+          ignore_rest_of_line ();
+          return;
+        }
 
       if (!tic54x_initialized_section (seg))
-	{
-	  as_bad (_(".sblock may be used for initialized sections only"));
-	  free (name);
-	  ignore_rest_of_line ();
-	  return;
-	}
+        {
+          as_bad (_(".sblock may be used for initialized sections only"));
+          free (name);
+          ignore_rest_of_line ();
+          return;
+        }
 
       seg->flags |= SEC_TIC54X_BLOCK;
       free (name);
 
-      c = *input_line_pointer;
-      if (!is_end_of_stmt (c))
-	++input_line_pointer;
+      if (is_end_of_stmt (*input_line_pointer))
+        break;
+
+      ++input_line_pointer;
     }
+  while (*input_line_pointer == ',');
 
   demand_empty_rest_of_line ();
 }
@@ -2396,41 +2554,40 @@ tic54x_set (int ignore ATTRIBUTE_UNUSED)
       ignore_rest_of_line ();
       return;
     }
-  
+
   name = xstrdup (S_GET_NAME (line_label));
   if (!name)
     {
-      as_bad (_("Memory allocation failed"));
+      as_bad (_("Failed to allocate memory for symbol name"));
       ignore_rest_of_line ();
       return;
     }
-  
+
   line_label = NULL;
   
   symbolP = symbol_find (name);
   if (!symbolP)
     {
       symbolP = md_undefined_symbol (name);
-    }
-  
-  if (!symbolP)
-    {
-      symbolP = symbol_new (name, absolute_section, &zero_address_frag, 0);
-      if (symbolP)
+      if (!symbolP)
         {
-          S_SET_STORAGE_CLASS (symbolP, C_STAT);
+          symbolP = symbol_new (name, absolute_section, &zero_address_frag, 0);
+          if (symbolP)
+            {
+              S_SET_STORAGE_CLASS (symbolP, C_STAT);
+            }
         }
     }
-  
+
   free (name);
-  
+
   if (!symbolP)
     {
-      as_bad (_("Symbol creation failed"));
+      as_bad (_("Failed to create symbol"));
       ignore_rest_of_line ();
       return;
     }
-  
+
   S_SET_DATA_TYPE (symbolP, T_INT);
   S_SET_SEGMENT (symbolP, absolute_section);
   symbol_table_insert (symbolP);
@@ -2443,22 +2600,28 @@ tic54x_set (int ignore ATTRIBUTE_UNUSED)
    List false conditional blocks.  */
 
 static void
-tic54x_fclist(int show)
+tic54x_fclist (int show)
 {
-    if (show) {
-        listing &= ~LISTING_NOCOND;
-    } else {
-        listing |= LISTING_NOCOND;
+  if (show != 0)
+    {
+      listing &= ~LISTING_NOCOND;
     }
-    demand_empty_rest_of_line();
+  else
+    {
+      listing |= LISTING_NOCOND;
+    }
+  demand_empty_rest_of_line ();
 }
 
-static void
-tic54x_sslist (int show)
+static void tic54x_sslist(int show)
 {
-  ILLEGAL_WITHIN_STRUCT ();
-
-  listing_sslist = (show != 0) ? 1 : 0;
+    if (current_stag.allocated)
+    {
+        as_bad(_("Illegal within a struct/union"));
+        ignore_rest_of_line();
+        return;
+    }
+    listing_sslist = show;
 }
 
 /* .var SYM[,...,SYMN]
@@ -2491,26 +2654,17 @@ tic54x_var (int ignore ATTRIBUTE_UNUSED)
       c = get_symbol_name (&name);
       if (name == NULL)
         {
-          as_bad (_("Invalid symbol name"));
           ignore_rest_of_line ();
           return;
         }
 
-      name = xstrdup (name);
-      if (name == NULL)
-        {
-          as_bad (_("Memory allocation failed"));
-          ignore_rest_of_line ();
-          return;
-        }
-
+      char *name_copy = xstrdup (name);
       c = restore_line_pointer (c);
 
       subsym_ent_t *ent = xmalloc (sizeof (*ent));
       if (ent == NULL)
         {
-          free (name);
-          as_bad (_("Memory allocation failed"));
+          free (name_copy);
           ignore_rest_of_line ();
           return;
         }
@@ -2520,15 +2674,8 @@ tic54x_var (int ignore ATTRIBUTE_UNUSED)
       ent->freeval = 0;
       ent->isproc = 0;
       ent->ismath = 0;
-
-      if (str_hash_insert (subsym_hash[macro_level], name, ent, 0) != 0)
-        {
-          free (name);
-          free (ent);
-          as_bad (_("Symbol insertion failed"));
-          ignore_rest_of_line ();
-          return;
-        }
+      
+      str_hash_insert (subsym_hash[macro_level], name_copy, ent, 0);
 
       if (c == ',')
         {
@@ -2555,14 +2702,15 @@ tic54x_mlib (int ignore ATTRIBUTE_UNUSED)
   char *filename;
   char *path;
   int len;
-  bfd *abfd, *mbfd;
+  bfd *abfd = NULL;
+  bfd *mbfd = NULL;
 
   ILLEGAL_WITHIN_STRUCT ();
 
   if (*input_line_pointer == '"')
     {
       filename = demand_copy_C_string (&len);
-      if (!filename)
+      if (filename == NULL)
         return;
     }
   else
@@ -2583,20 +2731,14 @@ tic54x_mlib (int ignore ATTRIBUTE_UNUSED)
 
   tic54x_set_default_include ();
   path = notes_alloc (len + include_dir_maxlen + 2);
-  if (!path)
-    {
-      as_bad (_("memory allocation failed"));
-      return;
-    }
-
   FILE *try = search_and_open (filename, path);
-  if (try)
+  if (try != NULL)
     fclose (try);
 
   register_dependency (path);
 
   abfd = bfd_openr (path, NULL);
-  if (!abfd)
+  if (abfd == NULL)
     {
       as_bad (_("can't open macro library file '%s' for reading: %s"),
               path, bfd_errmsg (bfd_get_error ()));
@@ -2606,8 +2748,8 @@ tic54x_mlib (int ignore ATTRIBUTE_UNUSED)
   if (!bfd_check_format (abfd, bfd_archive))
     {
       as_bad (_("File '%s' not in macro archive format"), path);
-      bfd_close (abfd);
       ignore_rest_of_line ();
+      bfd_close (abfd);
       return;
     }
 
@@ -2615,15 +2757,12 @@ tic54x_mlib (int ignore ATTRIBUTE_UNUSED)
        mbfd != NULL; mbfd = bfd_openr_next_archived_file (abfd, mbfd))
     {
       bfd_size_type size = bfd_get_size (mbfd);
-      if (size == 0)
-        continue;
+      char *buf = XNEWVEC (char, size);
+      char fname[L_tmpnam];
+      FILE *ftmp = NULL;
 
-      char *buf = XNEWVEC (char, size + 1);
-      if (!buf)
-        {
-          as_bad (_("memory allocation failed"));
-          continue;
-        }
+      if (buf == NULL)
+        continue;
 
       size = bfd_read (buf, size, mbfd);
       if (size == 0)
@@ -2632,29 +2771,22 @@ tic54x_mlib (int ignore ATTRIBUTE_UNUSED)
           continue;
         }
 
-      char fname[32];
-      snprintf (fname, sizeof(fname), "/tmp/tic54x_%d_%ld", getpid(), (long)time(NULL));
-      
-      FILE *ftmp = fopen (fname, "w+b");
-      if (!ftmp)
+      if (tmpnam (fname) == NULL)
         {
-          as_bad (_("can't create temporary file"));
           free (buf);
           continue;
         }
 
-      if (fwrite (buf, 1, size, ftmp) != size)
+      ftmp = fopen (fname, "w+b");
+      if (ftmp == NULL)
         {
-          as_bad (_("write error to temporary file"));
-          fclose (ftmp);
-          remove (fname);
           free (buf);
           continue;
         }
 
-      if (size == 0 || buf[size - 1] != '\n')
+      fwrite (buf, size, 1, ftmp);
+      if (buf[size - 1] != '\n')
         fwrite ("\n", 1, 1, ftmp);
-      
       fclose (ftmp);
       free (buf);
       input_scrub_insert_file (fname);
@@ -2758,40 +2890,35 @@ md_parse_option (int c, const char *arg)
     {
     default:
       return 0;
+      
     case OPTION_COFF_VERSION:
       {
-	int version = atoi (arg);
-
-	if (version < 0 || version > 2)
-	  as_fatal (_("Bad COFF version '%s'"), arg);
-	break;
+        int version = atoi (arg);
+        if (version != 0 && version != 1 && version != 2)
+          as_fatal (_("Bad COFF version '%s'"), arg);
+        break;
       }
+      
     case OPTION_CPU_VERSION:
       {
-	if (arg == NULL)
-	  as_fatal (_("CPU version argument is NULL"));
-	cpu = lookup_version (arg);
-	cpu_needs_set = 1;
-	if (cpu == VNONE)
-	  as_fatal (_("Bad CPU version '%s'"), arg);
-	break;
+        cpu = lookup_version (arg);
+        cpu_needs_set = 1;
+        if (cpu == VNONE)
+          as_fatal (_("Bad CPU version '%s'"), arg);
+        break;
       }
+      
     case OPTION_ADDRESS_MODE:
       amode = far_mode;
       address_mode_needs_set = 1;
       break;
+      
     case OPTION_STDERR_TO_FILE:
       {
-	if (arg == NULL)
-	  as_fatal (_("Filename argument is NULL"));
-	FILE *fp = fopen (arg, "w+");
-	if (fp == NULL)
-	  as_fatal (_("Can't redirect stderr to the file '%s'"), arg);
-	fclose (fp);
-	fp = freopen (arg, "w+", stderr);
-	if (fp == NULL)
-	  as_fatal (_("Can't redirect stderr to the file '%s'"), arg);
-	break;
+        FILE *fp = freopen (arg, "w+", stderr);
+        if (fp == NULL)
+          as_fatal (_("Can't redirect stderr to the file '%s'"), arg);
+        break;
       }
     }
 
@@ -2812,90 +2939,94 @@ tic54x_macro_start (void)
       return;
     }
   
-  ++macro_level;
+  macro_level++;
   subsym_hash[macro_level] = subsym_htab_create ();
   local_label_hash[macro_level] = local_label_htab_create ();
 }
 
-void
-tic54x_macro_info (const macro_entry *macro)
+void tic54x_macro_info(const macro_entry *macro)
 {
-  const formal_entry *entry;
+    if (!macro) {
+        return;
+    }
 
-  if (!macro) {
-    return;
-  }
-
-  for (entry = macro->formals; entry; entry = entry->next)
-    {
-      if (!entry->name.ptr || entry->name.len == 0) {
-        continue;
-      }
-
-      char *name = xstrndup (entry->name.ptr, entry->name.len);
-      if (!name) {
-        continue;
-      }
-
-      subsym_ent_t *ent = xmalloc (sizeof (*ent));
-      if (!ent) {
-        free (name);
-        continue;
-      }
-
-      ent->u.s = entry->actual.ptr ? xstrndup (entry->actual.ptr, entry->actual.len) : NULL;
-      ent->freekey = 1;
-      ent->freeval = 1;
-      ent->isproc = 0;
-      ent->ismath = 0;
-      
-      if (str_hash_insert (subsym_hash[macro_level], name, ent, 0) != 0) {
-        free (name);
-        free (ent->u.s);
-        free (ent);
-      }
+    const formal_entry *entry = macro->formals;
+    
+    while (entry) {
+        if (!entry->name.ptr || !entry->actual.ptr) {
+            entry = entry->next;
+            continue;
+        }
+        
+        char *name = xstrndup(entry->name.ptr, entry->name.len);
+        if (!name) {
+            entry = entry->next;
+            continue;
+        }
+        
+        subsym_ent_t *ent = xmalloc(sizeof(*ent));
+        if (!ent) {
+            free(name);
+            entry = entry->next;
+            continue;
+        }
+        
+        ent->u.s = xstrndup(entry->actual.ptr, entry->actual.len);
+        if (!ent->u.s) {
+            free(ent);
+            free(name);
+            entry = entry->next;
+            continue;
+        }
+        
+        ent->freekey = 1;
+        ent->freeval = 1;
+        ent->isproc = 0;
+        ent->ismath = 0;
+        
+        str_hash_insert(subsym_hash[macro_level], name, ent, 0);
+        
+        entry = entry->next;
     }
 }
 
 /* Get rid of this macro's .var's, arguments, and local labels.  */
 
-void
-tic54x_macro_end (void)
+void tic54x_macro_end(void)
 {
-  if (macro_level > 0)
-  {
-    if (subsym_hash[macro_level] != NULL)
-    {
-      htab_delete (subsym_hash[macro_level]);
-      subsym_hash[macro_level] = NULL;
+    if (macro_level < 0) {
+        return;
     }
-    if (local_label_hash[macro_level] != NULL)
-    {
-      htab_delete (local_label_hash[macro_level]);
-      local_label_hash[macro_level] = NULL;
+    
+    if (subsym_hash[macro_level] != NULL) {
+        htab_delete(subsym_hash[macro_level]);
+        subsym_hash[macro_level] = NULL;
     }
-    --macro_level;
-  }
+    
+    if (local_label_hash[macro_level] != NULL) {
+        htab_delete(local_label_hash[macro_level]);
+        local_label_hash[macro_level] = NULL;
+    }
+    
+    if (macro_level > 0) {
+        --macro_level;
+    }
 }
 
-static int
-subsym_symlen (char *a, char *ignore)
+static int subsym_symlen(char *a, char *ignore ATTRIBUTE_UNUSED)
 {
-  (void)ignore;
-  
-  if (a == NULL)
-    return 0;
-    
-  return strlen (a);
+    if (a == NULL) {
+        return 0;
+    }
+    return (int)strlen(a);
 }
 
 /* Compare symbol A to string B.  */
 
-static int
-subsym_symcmp(const char *a, const char *b)
+static int subsym_symcmp(const char *a, const char *b)
 {
-    if (!a || !b) {
-        return (a == b) ? 0 : (a ? 1 : -1);
+    if (a == NULL || b == NULL) {
+        return (a == NULL) - (b == NULL);
     }
     return strcmp(a, b);
 }
@@ -2904,50 +3035,75 @@ subsym_symcmp(const char *a, const char *b)
    assumes b is an integer char value as a string.  Index is one-based.  */
 
 static int
-subsym_firstch(const char *a, const char *b)
-{
-    if (!a || !b) {
-        return 0;
-    }
-    
-    int val = atoi(b);
-    if (val < 0 || val > 255) {
-        return 0;
-    }
-    
-    const char *tmp = strchr(a, val);
-    return tmp ? (int)(tmp - a + 1) : 0;
-}
-
-/* Similar to firstch, but returns index of last occurrence of B in A.  */
-
-static int
-subsym_lastch (const char *a, const char *b)
+subsym_firstch (char *a, char *b)
 {
   if (!a || !b) {
     return 0;
   }
+
+  char *endptr;
+  long val = strtol(b, &endptr, 10);
   
-  int val = atoi (b);
-  if (val < 0 || val > 255) {
+  if (endptr == b || val < 0 || val > 127) {
     return 0;
   }
   
-  const char *tmp = strrchr (a, val);
-  return tmp ? (int)(tmp - a + 1) : 0;
+  char *tmp = strchr(a, (int)val);
+  
+  if (!tmp) {
+    return 0;
+  }
+  
+  ptrdiff_t diff = tmp - a;
+  
+  if (diff > INT_MAX - 1) {
+    return 0;
+  }
+  
+  return (int)(diff + 1);
+}
+
+/* Similar to firstch, but returns index of last occurrence of B in A.  */
+
+static int subsym_lastch(char *a, char *b)
+{
+    if (a == NULL || b == NULL) {
+        return 0;
+    }
+    
+    char *endptr;
+    long val = strtol(b, &endptr, 10);
+    
+    if (*endptr != '\0' || val < CHAR_MIN || val > CHAR_MAX) {
+        return 0;
+    }
+    
+    char *tmp = strrchr(a, (int)val);
+    
+    if (tmp == NULL) {
+        return 0;
+    }
+    
+    ptrdiff_t diff = tmp - a;
+    
+    if (diff > INT_MAX - 1) {
+        return 0;
+    }
+    
+    return (int)(diff + 1);
 }
 
 /* Returns 1 if string A is defined in the symbol table (NOT the substitution
    symbol table).  */
 
-static int
-subsym_isdefed (char *a, char *ignore ATTRIBUTE_UNUSED)
+static int subsym_isdefed(char *a, char *ignore ATTRIBUTE_UNUSED)
 {
-  if (a == NULL)
-    return 0;
-
-  symbolS *symbolP = symbol_find (a);
-  return (symbolP != NULL) ? 1 : 0;
+    if (a == NULL) {
+        return 0;
+    }
+    
+    symbolS *symbolP = symbol_find(a);
+    return symbolP != NULL;
 }
 
 /* Assign first member of comma-separated list B (e.g. "1,2,3") to the symbol
@@ -2957,10 +3113,12 @@ subsym_isdefed (char *a, char *ignore ATTRIBUTE_UNUSED)
 static int
 subsym_ismember (char *sym, char *list)
 {
-  char *elem, *ptr, *list_copy;
   subsym_ent_t *listv;
+  char *elem;
+  char *ptr;
+  char *comma_pos;
 
-  if (!list || !sym)
+  if (!sym || !list)
     return 0;
 
   listv = subsym_lookup (list, macro_level);
@@ -2974,19 +3132,19 @@ subsym_ismember (char *sym, char *list)
   if (!listv->u.s)
     return 0;
 
-  list_copy = notes_strdup (listv->u.s);
-  if (!list_copy)
+  elem = notes_strdup (listv->u.s);
+  if (!elem)
     return 0;
 
-  elem = list_copy;
-  ptr = elem;
-  while (*ptr && *ptr != ',')
-    ++ptr;
-
-  if (*ptr == ',')
+  comma_pos = strchr (elem, ',');
+  if (comma_pos)
     {
-      *ptr = '\0';
-      ptr++;
+      *comma_pos = '\0';
+      ptr = comma_pos + 1;
+    }
+  else
+    {
+      ptr = elem + strlen (elem);
     }
 
   subsym_create_or_replace (sym, elem);
@@ -3003,62 +3161,55 @@ subsym_ismember (char *sym, char *list)
    5 if decimal.  */
 
 static int
-subsym_iscons(char *a, char *ignore ATTRIBUTE_UNUSED)
+subsym_iscons (char *a, char *ignore ATTRIBUTE_UNUSED)
 {
-    expressionS expn;
-    int len;
-    char last_char;
-
-    if (!a) {
-        return 0;
+  expressionS expn;
+  int len;
+  char last_char;
+  
+  if (a == NULL)
+    return 0;
+    
+  parse_expression (a, &expn);
+  
+  if (expn.X_op != O_constant)
+    return 0;
+  
+  len = strlen (a);
+  if (len == 0)
+    return 0;
+    
+  last_char = TOUPPER (a[len - 1]);
+  
+  if (last_char == 'B')
+    return 1;
+  if (last_char == 'Q')
+    return 2;
+  if (last_char == 'H')
+    return 3;
+  if (last_char == '\'')
+    return 4;
+    
+  if (len > 1 && a[0] == '0')
+    {
+      if (TOUPPER (a[1]) == 'X')
+        return 3;
+      return 2;
     }
-
-    parse_expression(a, &expn);
-
-    if (expn.X_op != O_constant) {
-        return 0;
-    }
-
-    len = strlen(a);
-    if (len == 0) {
-        return 0;
-    }
-
-    last_char = TOUPPER(a[len - 1]);
-    switch (last_char) {
-        case 'B':
-            return 1;
-        case 'Q':
-            return 2;
-        case 'H':
-            return 3;
-        case '\'':
-            return 4;
-        default:
-            break;
-    }
-
-    if (*a == '0' && len > 1) {
-        if (TOUPPER(a[1]) == 'X') {
-            return 3;
-        }
-        return 2;
-    }
-
-    return 5;
+    
+  return 5;
 }
 
 /* Return 1 if A is a valid symbol name.  Expects string input.   */
 
-static int
-subsym_isname(char *a, char *ignore ATTRIBUTE_UNUSED)
+static int subsym_isname(char *a, char *ignore ATTRIBUTE_UNUSED)
 {
-    if (!a || !is_name_beginner(*a))
+    if (a == NULL || !is_name_beginner(*a))
         return 0;
     
-    for (char *p = a; *p; ++p)
+    for (; *a; ++a)
     {
-        if (!is_part_of_name(*p))
+        if (!is_part_of_name(*a))
             return 0;
     }
     
@@ -3072,7 +3223,8 @@ subsym_isname(char *a, char *ignore ATTRIBUTE_UNUSED)
 static int
 subsym_isreg (char *a, char *ignore ATTRIBUTE_UNUSED)
 {
-  return (str_hash_find (reg_hash, a) != NULL || str_hash_find (mmreg_hash, a) != NULL);
+  return (str_hash_find (reg_hash, a) != NULL) || 
+         (str_hash_find (mmreg_hash, a) != NULL);
 }
 
 /* Return the structure size, given the stag.  */
@@ -3082,12 +3234,12 @@ subsym_structsz (char *name, char *ignore ATTRIBUTE_UNUSED)
 {
   struct stag *stag;
   
-  if (!name)
+  if (name == NULL) {
     return 0;
-    
+  }
+  
   stag = str_hash_find (stag_hash, name);
-
-  return stag ? stag->size : 0;
+  return (stag != NULL) ? stag->size : 0;
 }
 
 /* If anybody actually uses this, they can fix it :)
@@ -3097,95 +3249,104 @@ subsym_structsz (char *name, char *ignore ATTRIBUTE_UNUSED)
    altogether.  since the TI assembler doesn't seem to ever do anything but
    return zero, we punt and return zero.  */
 
-static int
-subsym_structacc(char *stag_name, char *ignore)
+static int subsym_structacc(char *stag_name ATTRIBUTE_UNUSED, char *ignore ATTRIBUTE_UNUSED)
 {
-    (void)stag_name;
-    (void)ignore;
     return 0;
 }
 
 static float
-math_ceil(float arg1, float ignore)
+math_ceil (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
-    return ceilf(arg1);
+  return ceilf (arg1);
 }
 
-static int
-math_cvi(float arg1, float ignore ATTRIBUTE_UNUSED)
+static int math_cvi(float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    if (arg1 > (float)INT_MAX) {
+    if (isnan(arg1) || isinf(arg1)) {
+        return 0;
+    }
+    
+    if (arg1 > INT_MAX) {
         return INT_MAX;
     }
-    if (arg1 < (float)INT_MIN) {
+    
+    if (arg1 < INT_MIN) {
         return INT_MIN;
     }
+    
     return (int)arg1;
 }
 
 static float
-math_floor(float arg1, float ignore)
+math_floor (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
-    return floorf(arg1);
+  return floorf (arg1);
 }
 
 static float
-math_fmod(float arg1, float arg2)
+math_fmod (float arg1, float arg2)
 {
-    if (arg2 == 0.0f) {
-        return 0.0f;
-    }
-    
-    int int_arg1 = (int)arg1;
-    int int_arg2 = (int)arg2;
-    
-    return (float)(int_arg1 % int_arg2);
+  if (arg2 == 0.0f) {
+    return 0.0f;
+  }
+  
+  int int_arg1 = (int) arg1;
+  int int_arg2 = (int) arg2;
+  
+  if (int_arg2 == 0) {
+    return 0.0f;
+  }
+  
+  return (float)(int_arg1 % int_arg2);
 }
 
 static int
-math_int(float arg1, float ignore)
+math_int (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
-    int int_value = (int)arg1;
-    return arg1 == (float)int_value;
+  int truncated = (int) arg1;
+  float converted_back = (float) truncated;
+  return arg1 == converted_back;
 }
 
 static float
 math_round (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-  if (arg1 > 0.0f) {
-    return (float)(int)(arg1 + 0.5f);
-  } else {
-    return (float)(int)(arg1 - 0.5f);
+  const float ROUNDING_OFFSET = 0.5f;
+  
+  if (arg1 >= 0.0f) {
+    return (float)(int)(arg1 + ROUNDING_OFFSET);
   }
+  
+  return (float)(int)(arg1 - ROUNDING_OFFSET);
 }
 
 static int
-math_sgn(float arg1, float ignore ATTRIBUTE_UNUSED)
+math_sgn (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    if (arg1 < 0.0f) {
-        return -1;
-    }
-    if (arg1 > 0.0f) {
-        return 1;
-    }
-    return 0;
+  if (arg1 < 0.0f) {
+    return -1;
+  }
+  if (arg1 > 0.0f) {
+    return 1;
+  }
+  return 0;
 }
 
 static float
-math_trunc(float arg1, float ignore)
+math_trunc (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-  (void)ignore;
-  return (float)(int)arg1;
+  return (float)(int) arg1;
 }
 
 static float
-math_acos(float arg1, float ignore)
+math_acos (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
-    return (float)acos(arg1);
+  if (arg1 < -1.0f || arg1 > 1.0f)
+  {
+    errno = EDOM;
+    return 0.0f;
+  }
+  return (float) acos ((double) arg1);
 }
 
 static float
@@ -3193,59 +3354,49 @@ math_asin (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
   if (arg1 < -1.0f || arg1 > 1.0f) {
     errno = EDOM;
-    return NAN;
+    return 0.0f;
   }
-  return (float) asin (arg1);
+  return (float) asin ((double) arg1);
 }
 
-static float
-math_atan(float arg1, float ignore)
+static float math_atan(float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
     return atanf(arg1);
 }
 
 static float
-math_atan2(float arg1, float arg2)
+math_atan2 (float arg1, float arg2)
 {
-    if (isnan(arg1) || isnan(arg2)) {
-        return NAN;
-    }
-    return (float)atan2(arg1, arg2);
+  return atan2f (arg1, arg2);
 }
 
 static float
-math_cosh(float arg1, float ignore ATTRIBUTE_UNUSED)
+math_cosh (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    return coshf(arg1);
+  return coshf (arg1);
+}
+
+static float math_cos(float arg1, float ignore ATTRIBUTE_UNUSED)
+{
+    return cosf(arg1);
 }
 
 static float
-math_cos (float arg1, float ignore)
+math_cvf (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-  (void)ignore;
-  return cosf(arg1);
+  return arg1;
 }
 
 static float
-math_cvf(float arg1, float ignore)
+math_exp (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
-    return arg1;
+  return expf (arg1);
 }
 
 static float
-math_exp(float arg1, float ignore)
+math_fabs (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
-    return expf(arg1);
-}
-
-static float
-math_fabs(float arg1, float ignore)
-{
-    (void)ignore;
-    return fabsf(arg1);
+  return fabsf (arg1);
 }
 
 /* expr1 * 2^expr2.  */
@@ -3253,107 +3404,90 @@ math_fabs(float arg1, float ignore)
 static float
 math_ldexp (float arg1, float arg2)
 {
+  if (!isfinite(arg1) || !isfinite(arg2)) {
+    return 0.0f;
+  }
+  
+  if (arg2 > 128.0f) {
+    arg2 = 128.0f;
+  } else if (arg2 < -128.0f) {
+    arg2 = -128.0f;
+  }
+  
   return ldexpf(arg1, (int)arg2);
 }
 
 static float
-math_log10(float arg1, float ignore)
+math_log10 (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
-    return (float)log10(arg1);
-}
-
-static float
-math_log(float arg1, float ignore)
-{
-    (void)ignore;
-    
-    if (arg1 <= 0.0f) {
-        return NAN;
-    }
-    
-    return (float)log((double)arg1);
-}
-
-static float
-math_max(float arg1, float arg2)
-{
-    if (isnan(arg1)) return arg2;
-    if (isnan(arg2)) return arg1;
-    return (arg1 > arg2) ? arg1 : arg2;
-}
-
-#include <math.h>
-
-static float
-math_min (float arg1, float arg2)
-{
-  if (isnan(arg1) || isnan(arg2)) {
+  if (arg1 <= 0.0f)
+  {
+    errno = EDOM;
     return NAN;
   }
-  return (arg1 < arg2) ? arg1 : arg2;
+  return log10f (arg1);
 }
 
 static float
-math_pow(float arg1, float arg2)
+math_log (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    if (isnan(arg1) || isnan(arg2)) {
-        return NAN;
-    }
-    
-    if (arg1 == 0.0f && arg2 < 0.0f) {
-        return INFINITY;
-    }
-    
-    if (arg1 < 0.0f && floor(arg2) != arg2) {
-        return NAN;
-    }
-    
-    double result = pow((double)arg1, (double)arg2);
-    
-    if (isinf(result)) {
-        return (result > 0) ? INFINITY : -INFINITY;
-    }
-    
-    return (float)result;
+  if (arg1 <= 0.0f)
+  {
+    errno = EDOM;
+    return NAN;
+  }
+  return logf (arg1);
 }
 
-static float
-math_sin(float arg1, float ignore)
+static float math_max(float arg1, float arg2)
 {
-    (void)ignore;
+    if (arg1 > arg2) {
+        return arg1;
+    }
+    return arg2;
+}
+
+static float math_min(float arg1, float arg2)
+{
+    if (arg1 < arg2) {
+        return arg1;
+    }
+    return arg2;
+}
+
+static float math_pow(float arg1, float arg2)
+{
+    return powf(arg1, arg2);
+}
+
+static float math_sin(float arg1, float ignore ATTRIBUTE_UNUSED)
+{
     return sinf(arg1);
 }
 
-static float
-math_sinh(float arg1, float ignore)
+static float math_sinh(float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
-    return (float)sinh(arg1);
+    return sinhf(arg1);
 }
 
 static float
-math_sqrt(float arg1, float ignore)
+math_sqrt (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
-    if (arg1 < 0.0f) {
-        return 0.0f;
-    }
-    return (float)sqrt(arg1);
+  if (arg1 < 0.0f) {
+    return 0.0f;
+  }
+  return sqrtf (arg1);
 }
 
 static float
-math_tan (float arg1, float ignore)
+math_tan (float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-  (void)ignore;
-  return tanf(arg1);
+  return tanf (arg1);
 }
 
-static float
-math_tanh(float arg1, float ignore)
+static float math_tanh(float arg1, float ignore ATTRIBUTE_UNUSED)
 {
-    (void)ignore;
-    return (float)tanh(arg1);
+    return tanhf(arg1);
 }
 
 /* Built-in substitution symbol functions and math functions.  */
@@ -3409,81 +3543,159 @@ static const subsym_proc_entry subsym_procs[] =
 void
 md_begin (void)
 {
-  insn_template *tm;
-  const tic54x_symbol *sym;
-  const subsym_proc_entry *subsym_proc;
-  const char **symname;
-  char *TIC54X_DIR = getenv ("TIC54X_DIR");
-  char *A_DIR = TIC54X_DIR ? TIC54X_DIR : getenv ("A_DIR");
-
   local_label_id = 0;
 
-  if (A_DIR != NULL)
+  process_environment_directories();
+  initialize_instruction_hashes();
+  initialize_register_hashes();
+  initialize_condition_code_hashes();
+  initialize_misc_hashes();
+  initialize_substitution_tables();
+}
+
+static void
+process_environment_directories (void)
+{
+  char *tic54x_dir = getenv ("TIC54X_DIR");
+  char *dir = tic54x_dir ? tic54x_dir : getenv ("A_DIR");
+
+  if (dir == NULL)
+    return;
+
+  char *tmp = notes_strdup (dir);
+  if (tmp == NULL)
+    return;
+
+  char *current = tmp;
+  while (current != NULL)
     {
-      char *tmp = notes_strdup (A_DIR);
-      char *current = tmp;
-
-      while (current != NULL)
-	{
-	  char *next = strchr (current, ';');
-
-	  if (next)
-	    *next++ = '\0';
-	  add_include_dir (current);
-	  current = next;
-	}
+      char *next = strchr (current, ';');
+      if (next)
+        *next++ = '\0';
+      add_include_dir (current);
+      current = next;
     }
+}
+
+static void
+initialize_instruction_hashes (void)
+{
+  insn_template *tm;
 
   op_hash = str_htab_create ();
+  if (op_hash == NULL)
+    return;
+
   for (tm = (insn_template *) tic54x_optab; tm->name; tm++)
     str_hash_insert (op_hash, tm->name, tm, 0);
 
   parop_hash = str_htab_create ();
+  if (parop_hash == NULL)
+    return;
+
   for (tm = (insn_template *) tic54x_paroptab; tm->name; tm++)
     str_hash_insert (parop_hash, tm->name, tm, 0);
+}
+
+static void
+initialize_register_hashes (void)
+{
+  const tic54x_symbol *sym;
 
   reg_hash = str_htab_create ();
+  if (reg_hash == NULL)
+    return;
+
   for (sym = tic54x_regs; sym->name; sym++)
     {
       symbolS *symbolP = symbol_new (sym->name, absolute_section,
-				     &zero_address_frag, sym->value);
-      SF_SET_LOCAL (symbolP);
-      symbol_table_insert (symbolP);
+                                    &zero_address_frag, sym->value);
+      if (symbolP != NULL)
+        {
+          SF_SET_LOCAL (symbolP);
+          symbol_table_insert (symbolP);
+        }
       str_hash_insert (reg_hash, sym->name, sym, 0);
     }
-  
+
   for (sym = tic54x_mmregs; sym->name; sym++)
     str_hash_insert (reg_hash, sym->name, sym, 0);
-  
+
   mmreg_hash = str_htab_create ();
+  if (mmreg_hash == NULL)
+    return;
+
   for (sym = tic54x_mmregs; sym->name; sym++)
     str_hash_insert (mmreg_hash, sym->name, sym, 0);
+}
+
+static void
+initialize_condition_code_hashes (void)
+{
+  const tic54x_symbol *sym;
 
   cc_hash = str_htab_create ();
-  for (sym = tic54x_condition_codes; sym->name; sym++)
-    str_hash_insert (cc_hash, sym->name, sym, 0);
+  if (cc_hash != NULL)
+    {
+      for (sym = tic54x_condition_codes; sym->name; sym++)
+        str_hash_insert (cc_hash, sym->name, sym, 0);
+    }
 
   cc2_hash = str_htab_create ();
-  for (sym = tic54x_cc2_codes; sym->name; sym++)
-    str_hash_insert (cc2_hash, sym->name, sym, 0);
+  if (cc2_hash != NULL)
+    {
+      for (sym = tic54x_cc2_codes; sym->name; sym++)
+        str_hash_insert (cc2_hash, sym->name, sym, 0);
+    }
 
   cc3_hash = str_htab_create ();
-  for (sym = tic54x_cc3_codes; sym->name; sym++)
-    str_hash_insert (cc3_hash, sym->name, sym, 0);
+  if (cc3_hash != NULL)
+    {
+      for (sym = tic54x_cc3_codes; sym->name; sym++)
+        str_hash_insert (cc3_hash, sym->name, sym, 0);
+    }
 
   sbit_hash = str_htab_create ();
-  for (sym = tic54x_status_bits; sym->name; sym++)
-    str_hash_insert (sbit_hash, sym->name, sym, 0);
+  if (sbit_hash != NULL)
+    {
+      for (sym = tic54x_status_bits; sym->name; sym++)
+        str_hash_insert (sbit_hash, sym->name, sym, 0);
+    }
+}
+
+static void
+initialize_misc_hashes (void)
+{
+  const char **symname;
 
   misc_symbol_hash = str_htab_create ();
+  if (misc_symbol_hash == NULL)
+    return;
+
   for (symname = tic54x_misc_symbols; *symname; symname++)
     str_hash_insert (misc_symbol_hash, *symname, *symname, 0);
 
+  subsym_recurse_hash = str_htab_create ();
+  stag_hash = str_htab_create ();
+}
+
+static void
+initialize_substitution_tables (void)
+{
+  const subsym_proc_entry *subsym_proc;
+
   local_label_hash[0] = local_label_htab_create ();
   subsym_hash[0] = subsym_htab_create ();
+
+  if (subsym_hash[0] == NULL)
+    return;
+
   for (subsym_proc = subsym_procs; subsym_proc->name; subsym_proc++)
     {
       subsym_ent_t *ent = xmalloc (sizeof (*ent));
+      if (ent == NULL)
+        continue;
+
       ent->u.p = subsym_proc;
       ent->freekey = 0;
       ent->freeval = 0;
@@ -3491,96 +3703,49 @@ md_begin (void)
       ent->ismath = subsym_proc->type != 0;
       str_hash_insert (subsym_hash[0], subsym_proc->name, ent, 0);
     }
-  subsym_recurse_hash = str_htab_create ();
-  stag_hash = str_htab_create ();
 }
 
 void
 tic54x_md_end (void)
 {
-  if (stag_hash != NULL)
-  {
-    htab_delete (stag_hash);
-    stag_hash = NULL;
-  }
-  
-  if (subsym_recurse_hash != NULL)
-  {
-    htab_delete (subsym_recurse_hash);
-    subsym_recurse_hash = NULL;
-  }
-  
-  while (macro_level > 0)
-  {
+  static htab_t *hash_tables[] = {
+    &stag_hash,
+    &subsym_recurse_hash,
+    &misc_symbol_hash,
+    &sbit_hash,
+    &cc3_hash,
+    &cc2_hash,
+    &cc_hash,
+    &mmreg_hash,
+    &reg_hash,
+    &parop_hash,
+    &op_hash,
+    NULL
+  };
+
+  while (macro_level > -1)
     tic54x_macro_end ();
-    macro_level--;
-  }
+  
   macro_level = 0;
-  
-  if (misc_symbol_hash != NULL)
+
+  for (htab_t **table_ptr = hash_tables; *table_ptr != NULL; table_ptr++)
   {
-    htab_delete (misc_symbol_hash);
-    misc_symbol_hash = NULL;
-  }
-  
-  if (sbit_hash != NULL)
-  {
-    htab_delete (sbit_hash);
-    sbit_hash = NULL;
-  }
-  
-  if (cc3_hash != NULL)
-  {
-    htab_delete (cc3_hash);
-    cc3_hash = NULL;
-  }
-  
-  if (cc2_hash != NULL)
-  {
-    htab_delete (cc2_hash);
-    cc2_hash = NULL;
-  }
-  
-  if (cc_hash != NULL)
-  {
-    htab_delete (cc_hash);
-    cc_hash = NULL;
-  }
-  
-  if (mmreg_hash != NULL)
-  {
-    htab_delete (mmreg_hash);
-    mmreg_hash = NULL;
-  }
-  
-  if (reg_hash != NULL)
-  {
-    htab_delete (reg_hash);
-    reg_hash = NULL;
-  }
-  
-  if (parop_hash != NULL)
-  {
-    htab_delete (parop_hash);
-    parop_hash = NULL;
-  }
-  
-  if (op_hash != NULL)
-  {
-    htab_delete (op_hash);
-    op_hash = NULL;
+    if (**table_ptr != NULL)
+    {
+      htab_delete (**table_ptr);
+      **table_ptr = NULL;
+    }
   }
 }
 
-static int
-is_accumulator(struct opstruct *operand)
+static int is_accumulator(const struct opstruct *operand)
 {
-    if (!operand || !operand->buf) {
+    if (operand == NULL || operand->buf == NULL) {
         return 0;
     }
     
-    return (strcasecmp(operand->buf, "a") == 0) || 
-           (strcasecmp(operand->buf, "b") == 0);
+    return strcasecmp(operand->buf, "a") == 0 ||
+           strcasecmp(operand->buf, "b") == 0;
 }
 
 /* Return the number of operands found, or -1 on error, copying the
@@ -3590,82 +3755,47 @@ is_accumulator(struct opstruct *operand)
 static int
 get_operands (struct opstruct operands[], char *line)
 {
-  if (!operands || !line) {
-    return -1;
-  }
-  
   char *lptr = line;
   int numexp = 0;
   int expecting_operand = 0;
-  
+
   while (numexp < MAX_OPERANDS && !is_end_of_stmt (*lptr))
     {
-      int paren_balance = 0;
-      char *op_start, *op_end;
-
-      while (is_whitespace (*lptr))
-        ++lptr;
-      op_start = lptr;
+      lptr = skip_whitespace(lptr);
       
-      while (paren_balance != 0 || *lptr != ',')
+      if (expecting_operand && (*lptr == ',' || *lptr == '\0'))
         {
-          if (*lptr == '\0')
-            {
-              if (paren_balance != 0)
-                {
-                  as_bad (_("Unbalanced parenthesis in operand %d"), numexp);
-                  return -1;
-                }
-              break;
-            }
-          if (*lptr == '(')
-            ++paren_balance;
-          else if (*lptr == ')')
-            --paren_balance;
-          ++lptr;
+          as_bad (_("Expecting operand after ','"));
+          return -1;
         }
       
-      op_end = lptr;
+      char *op_start = lptr;
+      char *op_end = find_operand_end(lptr);
+      
+      if (op_end == NULL)
+        {
+          as_bad (_("Unbalanced parenthesis in operand %d"), numexp);
+          return -1;
+        }
+      
       if (op_end != op_start)
         {
-          int len = op_end - op_start;
-          if (len >= sizeof(operands[numexp].buf))
-            {
-              as_bad (_("Operand too long"));
-              return -1;
-            }
-          
-          strncpy (operands[numexp].buf, op_start, len);
-          operands[numexp].buf[len] = '\0';
-          
-          while (len > 0 && is_whitespace (operands[numexp].buf[len - 1]))
-            operands[numexp].buf[--len] = '\0';
-          
-          lptr = op_end;
-          ++numexp;
+          if (copy_operand(operands[numexp].buf, op_start, op_end) < 0)
+            return -1;
+          numexp++;
         }
-      else
-        {
-          if (expecting_operand || *lptr == ',')
-            {
-              as_bad (_("Expecting operand after ','"));
-              return -1;
-            }
-        }
+      
+      lptr = op_end;
+      expecting_operand = 0;
       
       if (*lptr == ',')
         {
-          if (*++lptr == '\0')
-            {
-              as_bad (_("Expecting operand after ','"));
-              return -1;
-            }
+          lptr++;
           expecting_operand = 1;
         }
     }
 
-  while (is_whitespace (*lptr))
-    ++lptr;
+  lptr = skip_whitespace(lptr);
   if (!is_end_of_stmt (*lptr))
     {
       as_bad (_("Extra junk on line"));
@@ -3674,79 +3804,146 @@ get_operands (struct opstruct operands[], char *line)
 
   for (int i = 0; i < numexp; i++)
     {
-      memset (&operands[i].exp, 0, sizeof (operands[i].exp));
-      if (operands[i].buf[0] == '#')
-        {
-          parse_expression (operands[i].buf + 1, &operands[i].exp);
-        }
-      else if (operands[i].buf[0] == '@')
-        {
-          parse_expression (operands[i].buf + 1, &operands[i].exp);
-        }
-      else if (operands[i].buf[0] == '*')
-        {
-          char *paren = strchr (operands[i].buf, '(');
-
-          if (paren && paren[1] == '#')
-            *++paren = '(';
-
-          if (paren != NULL)
-            {
-              int len = strlen (paren);
-              char *end = paren + len;
-              char saved_char;
-
-              while (end > paren && end[-1] != ')')
-                --end;
-              
-              if (end <= paren)
-                {
-                  as_bad (_("Badly formed address expression"));
-                  return -1;
-                }
-              
-              saved_char = *end;
-              *end = '\0';
-              parse_expression (paren, &operands[i].exp);
-              *end = saved_char;
-            }
-          else
-            operands[i].exp.X_op = O_absent;
-        }
-      else
-        parse_expression (operands[i].buf, &operands[i].exp);
+      if (parse_operand_expression(&operands[i]) < 0)
+        return -1;
     }
 
   return numexp;
 }
 
+static char *skip_whitespace(char *ptr)
+{
+  while (is_whitespace(*ptr))
+    ptr++;
+  return ptr;
+}
+
+static char *find_operand_end(char *ptr)
+{
+  int paren_balance = 0;
+  
+  while (*ptr != '\0')
+    {
+      if (*ptr == '(')
+        paren_balance++;
+      else if (*ptr == ')')
+        {
+          paren_balance--;
+          if (paren_balance < 0)
+            return NULL;
+        }
+      else if (*ptr == ',' && paren_balance == 0)
+        break;
+      ptr++;
+    }
+  
+  return (paren_balance != 0) ? NULL : ptr;
+}
+
+static int copy_operand(char *dest, char *start, char *end)
+{
+  int len = end - start;
+  if (len >= MAX_OPERAND_LENGTH)
+    {
+      as_bad (_("Operand too long"));
+      return -1;
+    }
+  
+  strncpy(dest, start, len);
+  dest[len] = '\0';
+  
+  while (len > 0 && is_whitespace(dest[len - 1]))
+    dest[--len] = '\0';
+  
+  return 0;
+}
+
+static int parse_operand_expression(struct opstruct *operand)
+{
+  memset(&operand->exp, 0, sizeof(operand->exp));
+  
+  if (operand->buf[0] == '#' || operand->buf[0] == '@')
+    {
+      parse_expression(operand->buf + 1, &operand->exp);
+    }
+  else if (operand->buf[0] == '*')
+    {
+      if (parse_indirect_operand(operand) < 0)
+        return -1;
+    }
+  else
+    {
+      parse_expression(operand->buf, &operand->exp);
+    }
+  
+  return 0;
+}
+
+static int parse_indirect_operand(struct opstruct *operand)
+{
+  char *paren = strchr(operand->buf, '(');
+  
+  if (paren && paren[1] == '#')
+    *++paren = '(';
+  
+  if (paren != NULL)
+    {
+      char *end = find_matching_paren(paren);
+      if (end == NULL)
+        {
+          as_bad(_("Badly formed address expression"));
+          return -1;
+        }
+      
+      char saved = *end;
+      *end = '\0';
+      parse_expression(paren, &operand->exp);
+      *end = saved;
+    }
+  else
+    {
+      operand->exp.X_op = O_absent;
+    }
+  
+  return 0;
+}
+
+static char *find_matching_paren(char *paren)
+{
+  int len = strlen(paren);
+  char *end = paren + len;
+  
+  while (end > paren && end[-1] != ')')
+    end--;
+  
+  return (end <= paren) ? NULL : end;
+}
+
 /* Predicates for different operand types.  */
 
-static int
-is_immediate (struct opstruct *operand)
+static int is_immediate(const struct opstruct *operand)
 {
-  if (operand == NULL || operand->buf == NULL) {
-    return 0;
-  }
-  return *operand->buf == '#';
+    if (operand == NULL || operand->buf == NULL) {
+        return 0;
+    }
+    return operand->buf[0] == '#';
 }
 
 /* This is distinguished from immediate because some numbers must be constants
    and must *not* have the '#' prefix.  */
 
-static int
-is_absolute (struct opstruct *operand)
+static int is_absolute(struct opstruct *operand)
 {
-  if (operand == NULL) {
-    return 0;
-  }
-  return operand->exp.X_op == O_constant && !is_immediate (operand);
+    if (operand == NULL) {
+        return 0;
+    }
+    
+    return operand->exp.X_op == O_constant && !is_immediate(operand);
 }
 
 /* Is this an indirect operand?  */
 
-static int
-is_indirect(struct opstruct *operand)
+static int is_indirect(const struct opstruct *operand)
 {
     if (operand == NULL || operand->buf == NULL) {
         return 0;
@@ -3756,44 +3953,65 @@ is_indirect(struct opstruct *operand)
 
 /* Is this a valid dual-memory operand?  */
 
-static int
-is_dual (struct opstruct *operand)
+static int is_dual(struct opstruct *operand)
 {
-  if (!is_indirect(operand) || strncasecmp(operand->buf, "*ar", 3) != 0)
-    return 0;
+    if (!is_indirect(operand)) {
+        return 0;
+    }
     
-  char *tmp = operand->buf + 3;
-  int arf = *tmp - '0';
-  
-  if (arf < 2 || arf > 5)
-    return 0;
+    if (strncasecmp(operand->buf, "*ar", 3) != 0) {
+        return 0;
+    }
     
-  tmp++;
-  
-  return *tmp == '\0' ||
-         strcasecmp(tmp, "-") == 0 ||
-         strcasecmp(tmp, "+") == 0 ||
-         strcasecmp(tmp, "+0%") == 0;
+    const char *tmp = operand->buf + 3;
+    
+    if (*tmp < '2' || *tmp > '5') {
+        return 0;
+    }
+    
+    tmp++;
+    
+    if (*tmp == '\0') {
+        return 1;
+    }
+    
+    if (strcmp(tmp, "-") == 0) {
+        return 1;
+    }
+    
+    if (strcmp(tmp, "+") == 0) {
+        return 1;
+    }
+    
+    if (strcmp(tmp, "+0%") == 0) {
+        return 1;
+    }
+    
+    return 0;
 }
 
-static int
-is_mmreg (struct opstruct *operand)
+static int is_mmreg(struct opstruct *operand)
 {
-  if (operand == NULL) {
-    return 0;
-  }
-  
-  return (is_absolute (operand) ||
-          is_immediate (operand) ||
-          str_hash_find (mmreg_hash, operand->buf) != NULL);
+    if (operand == NULL) {
+        return 0;
+    }
+    
+    if (is_absolute(operand) || is_immediate(operand)) {
+        return 1;
+    }
+    
+    if (operand->buf == NULL) {
+        return 0;
+    }
+    
+    return str_hash_find(mmreg_hash, operand->buf) != NULL;
 }
 
 static int
 is_type (struct opstruct *operand, enum optype type)
 {
-  if (!operand) {
+  if (!operand)
     return 0;
-  }
 
   switch (type)
     {
@@ -3812,6 +4030,8 @@ is_type (struct opstruct *operand, enum optype type)
     case OP_dmad:
     case OP_Lmem:
     case OP_MMR:
+    case OP_lk:
+    case OP_lku:
       return 1;
     case OP_Smem:
       return !is_immediate (operand);
@@ -3828,7 +4048,8 @@ is_type (struct opstruct *operand, enum optype type)
     case OP_A:
       return is_accumulator (operand) && TOUPPER (operand->buf[0]) == 'A';
     case OP_ARX:
-      return strncasecmp ("ar", operand->buf, 2) == 0 && ISDIGIT (operand->buf[2]);
+      return strncasecmp ("ar", operand->buf, 2) == 0
+        && ISDIGIT (operand->buf[2]);
     case OP_SBIT:
       return str_hash_find (sbit_hash, operand->buf) != 0 || is_absolute (operand);
     case OP_CC:
@@ -3836,33 +4057,39 @@ is_type (struct opstruct *operand, enum optype type)
     case OP_CC2:
       return str_hash_find (cc2_hash, operand->buf) != 0;
     case OP_CC3:
-      return str_hash_find (cc3_hash, operand->buf) != 0 || is_immediate (operand) || is_absolute (operand);
+      return str_hash_find (cc3_hash, operand->buf) != 0
+        || is_immediate (operand) || is_absolute (operand);
     case OP_16:
-      return (is_immediate (operand) || is_absolute (operand)) && operand->exp.X_add_number == 16;
+      return (is_immediate (operand) || is_absolute (operand))
+        && operand->exp.X_add_number == 16;
     case OP_N:
-      return is_absolute (operand) || is_immediate (operand) || strcasecmp ("st0", operand->buf) == 0 || strcasecmp ("st1", operand->buf) == 0;
+      return is_absolute (operand) || is_immediate (operand) ||
+        strcasecmp ("st0", operand->buf) == 0 ||
+        strcasecmp ("st1", operand->buf) == 0;
     case OP_12:
     case OP_123:
-      return is_absolute (operand) || is_immediate (operand);
-    case OP_SHFT:
-      return (is_immediate (operand) || is_absolute (operand)) && operand->exp.X_add_number >= 0 && operand->exp.X_add_number < 16;
-    case OP_SHIFT:
-      return (is_immediate (operand) || is_absolute (operand)) && operand->exp.X_add_number != 16;
     case OP_BITC:
     case OP_031:
     case OP_k8:
       return is_absolute (operand) || is_immediate (operand);
+    case OP_SHFT:
+      return (is_immediate (operand) || is_absolute (operand))
+        && operand->exp.X_add_number >= 0 && operand->exp.X_add_number < 16;
+    case OP_SHIFT:
+      return (is_immediate (operand) || is_absolute (operand))
+        && operand->exp.X_add_number != 16;
     case OP_k8u:
-      return is_immediate (operand) && operand->exp.X_op == O_constant && operand->exp.X_add_number >= 0 && operand->exp.X_add_number < 256;
-    case OP_lk:
-    case OP_lku:
-      return 1;
+      return is_immediate (operand)
+        && operand->exp.X_op == O_constant
+        && operand->exp.X_add_number >= 0
+        && operand->exp.X_add_number < 256;
     case OP_k5:
     case OP_k3:
     case OP_k9:
       return is_immediate (operand);
     case OP_T:
-      return strcasecmp ("t", operand->buf) == 0 || strcasecmp ("treg", operand->buf) == 0;
+      return strcasecmp ("t", operand->buf) == 0 ||
+        strcasecmp ("treg", operand->buf) == 0;
     case OP_TS:
       return strcasecmp ("ts", operand->buf) == 0;
     case OP_ASM:
@@ -3886,51 +4113,54 @@ operands_match (tic54x_insn *insn,
 		int minops,
 		int maxops)
 {
-  int op = 0, refop = 0;
+  int op = 0;
+  int refop = 0;
+
+  if (insn == NULL || operands == NULL || refoptype == NULL)
+    return 0;
+
+  if (opcount < 0 || minops < 0 || maxops < 0 || minops > maxops)
+    return 0;
 
   if (opcount == 0 && minops == 0)
     return 1;
 
-  if (!operands || !refoptype || !insn)
+  if (opcount < minops || opcount > maxops)
     return 0;
 
-  while (op <= maxops && refop <= maxops)
+  while (op < opcount && refop <= maxops)
     {
-      while (!is_type (&operands[op], OPTYPE (refoptype[refop])))
+      if (!is_type (&operands[op], OPTYPE (refoptype[refop])))
 	{
-	  if (refoptype[refop] & OPT)
-	    {
-	      ++refop;
-	      --maxops;
-	      if (refop > maxops)
-		return 0;
-	    }
-	  else
+	  if ((refoptype[refop] & OPT) == 0)
 	    return 0;
+	  
+	  ++refop;
+	  if (refop > maxops)
+	    return 0;
+	  continue;
 	}
 
       operands[op].type = OPTYPE (refoptype[refop]);
       ++refop;
       ++op;
-
-      if (op == opcount)
-	{
-	  while (op < maxops)
-	    {
-	      if ((refoptype[refop] & OPT) == 0)
-		return 0;
-
-	      if (OPTYPE (refoptype[refop]) == OP_DST)
-		insn->using_default_dst = 1;
-
-	      ++refop;
-	      ++op;
-	    }
-	  return 1;
-	}
     }
 
-  return 0;
+  if (op != opcount)
+    return 0;
+
+  while (refop <= maxops)
+    {
+      if ((refoptype[refop] & OPT) == 0)
+	return 0;
+      
+      if (OPTYPE (refoptype[refop]) == OP_DST)
+	insn->using_default_dst = 1;
+      
+      ++refop;
+    }
+
+  return 1;
 }
 
 /* 16-bit direct memory address
@@ -3948,16 +4178,18 @@ static int
 encode_dmad (tic54x_insn *insn, struct opstruct *operand, int xpc_code)
 {
   int op;
-  valueT value;
   size_t buf_len;
 
   if (!insn || !operand || !operand->buf)
     return 0;
 
   op = 1 + insn->is_lkaddr;
-  buf_len = strlen(operand->buf);
 
-  if (is_indirect(operand) && buf_len > 0 && operand->buf[buf_len - 1] != ')')
+  buf_len = strlen(operand->buf);
+  if (buf_len == 0)
+    return 0;
+
+  if (is_indirect(operand) && operand->buf[buf_len - 1] != ')')
     {
       as_bad(_("Invalid dmad syntax '%s'"), operand->buf);
       return 0;
@@ -3967,8 +4199,8 @@ encode_dmad (tic54x_insn *insn, struct opstruct *operand, int xpc_code)
 
   if (insn->opcode[op].addr_expr.X_op == O_constant)
     {
-      value = insn->opcode[op].addr_expr.X_add_number;
-
+      valueT value = insn->opcode[op].addr_expr.X_add_number;
+      
       switch (xpc_code)
         {
         case 1:
@@ -3988,32 +4220,28 @@ encode_dmad (tic54x_insn *insn, struct opstruct *operand, int xpc_code)
     {
       insn->opcode[op].word = 0;
       insn->opcode[op].r_nchars = 2;
+      insn->opcode[op].unresolved = 1;
 
       if (amode == c_mode)
         {
           insn->opcode[op].r_type = BFD_RELOC_TIC54X_16_OF_23;
         }
+      else if (xpc_code == 1)
+        {
+          insn->opcode[0].addr_expr = operand->exp;
+          insn->opcode[0].r_type = BFD_RELOC_TIC54X_23;
+          insn->opcode[0].r_nchars = 4;
+          insn->opcode[0].unresolved = 1;
+          insn->words = 1;
+        }
+      else if (xpc_code == 2)
+        {
+          insn->opcode[op].r_type = BFD_RELOC_TIC54X_MS7_OF_23;
+        }
       else
         {
-          switch (xpc_code)
-            {
-            case 1:
-              insn->opcode[0].addr_expr = operand->exp;
-              insn->opcode[0].r_type = BFD_RELOC_TIC54X_23;
-              insn->opcode[0].r_nchars = 4;
-              insn->opcode[0].unresolved = 1;
-              insn->words = 1;
-              break;
-            case 2:
-              insn->opcode[op].r_type = BFD_RELOC_TIC54X_MS7_OF_23;
-              break;
-            default:
-              insn->opcode[op].r_type = BFD_RELOC_TIC54X_16_OF_23;
-              break;
-            }
+          insn->opcode[op].r_type = BFD_RELOC_TIC54X_16_OF_23;
         }
-
-      insn->opcode[op].unresolved = 1;
     }
 
   return 1;
@@ -4022,35 +4250,28 @@ encode_dmad (tic54x_insn *insn, struct opstruct *operand, int xpc_code)
 /* 7-bit direct address encoding.  */
 
 static int
-encode_address(tic54x_insn *insn, struct opstruct *operand)
+encode_address (tic54x_insn *insn, struct opstruct *operand)
 {
-    if (!insn || !operand) {
-        return 0;
-    }
+  if (insn == NULL || operand == NULL) {
+    return 0;
+  }
 
-    insn->opcode[0].addr_expr = operand->exp;
+  insn->opcode[0].addr_expr = operand->exp;
 
-    switch (operand->exp.X_op) {
-        case O_constant:
-            insn->opcode[0].word |= (operand->exp.X_add_number & 0x7F);
-            break;
-        
-        case O_register:
-            as_bad(_("Use the .mmregs directive to use memory-mapped register names such as '%s'"), 
-                   operand->buf);
-            insn->opcode[0].r_nchars = 1;
-            insn->opcode[0].r_type = BFD_RELOC_TIC54X_PARTLS7;
-            insn->opcode[0].unresolved = 1;
-            break;
-        
-        default:
-            insn->opcode[0].r_nchars = 1;
-            insn->opcode[0].r_type = BFD_RELOC_TIC54X_PARTLS7;
-            insn->opcode[0].unresolved = 1;
-            break;
-    }
-
+  if (operand->exp.X_op == O_constant) {
+    insn->opcode[0].word |= (operand->exp.X_add_number & 0x7F);
     return 1;
+  }
+
+  if (operand->exp.X_op == O_register) {
+    as_bad (_("Use the .mmregs directive to use memory-mapped register names such as '%s'"), operand->buf);
+  }
+
+  insn->opcode[0].r_nchars = 1;
+  insn->opcode[0].r_type = BFD_RELOC_TIC54X_PARTLS7;
+  insn->opcode[0].unresolved = 1;
+
+  return 1;
 }
 
 static int
@@ -4061,19 +4282,17 @@ encode_indirect (tic54x_insn *insn, struct opstruct *operand)
 
   if (insn->is_lkaddr)
     {
-      char second_char = operand->buf[1];
-      
-      if (TOUPPER(second_char) == 'A')
+      if (TOUPPER (operand->buf[1]) == 'A')
         {
           mod = 12;
           arf = operand->buf[3] - '0';
         }
-      else if (second_char == '(')
+      else if (operand->buf[1] == '(')
         {
           mod = 15;
           arf = 0;
         }
-      else if (strchr(operand->buf, '%') != NULL)
+      else if (strchr (operand->buf, '%') != NULL)
         {
           mod = 14;
           arf = operand->buf[4] - '0';
@@ -4087,9 +4306,7 @@ encode_indirect (tic54x_insn *insn, struct opstruct *operand)
       insn->opcode[1].addr_expr = operand->exp;
 
       if (operand->exp.X_op == O_constant)
-        {
-          insn->opcode[1].word = operand->exp.X_add_number;
-        }
+        insn->opcode[1].word = operand->exp.X_add_number;
       else
         {
           insn->opcode[1].word = 0;
@@ -4098,29 +4315,23 @@ encode_indirect (tic54x_insn *insn, struct opstruct *operand)
           insn->opcode[1].unresolved = 1;
         }
     }
-  else if (strncasecmp(operand->buf, "*sp (", 4) == 0)
+  else if (strncasecmp (operand->buf, "*sp (", 5) == 0)
     {
-      return encode_address(insn, operand);
+      return encode_address (insn, operand);
     }
   else
     {
-      if (TOUPPER(operand->buf[1]) == 'A')
-        {
-          arf = operand->buf[3] - '0';
-        }
+      if (TOUPPER (operand->buf[1]) == 'A')
+        arf = operand->buf[3] - '0';
       else
-        {
-          arf = operand->buf[4] - '0';
-        }
+        arf = operand->buf[4] - '0';
 
       if (operand->buf[1] == '+')
         {
           mod = 3;
           if (insn->tm->flags & FL_SMR)
-            {
-              as_warn(_("Address mode *+ARx is write-only. "
+            as_warn (_("Address mode *+ARx is write-only. "
                        "Results of reading are undefined."));
-            }
         }
       else if (operand->buf[4] == '\0')
         {
@@ -4128,36 +4339,33 @@ encode_indirect (tic54x_insn *insn, struct opstruct *operand)
         }
       else if (operand->buf[5] == '\0')
         {
-          mod = (operand->buf[4] == '-' ? 1 : 2);
+          mod = (operand->buf[4] == '-') ? 1 : 2;
         }
       else if (operand->buf[6] == '\0')
         {
           if (operand->buf[5] == '0')
-            {
-              mod = (operand->buf[4] == '-' ? 5 : 6);
-            }
+            mod = (operand->buf[4] == '-') ? 5 : 6;
           else
-            {
-              mod = (operand->buf[4] == '-' ? 8 : 10);
-            }
+            mod = (operand->buf[4] == '-') ? 8 : 10;
         }
-      else if (TOUPPER(operand->buf[6]) == 'B')
+      else if (TOUPPER (operand->buf[6]) == 'B')
         {
-          mod = (operand->buf[4] == '-' ? 4 : 7);
+          mod = (operand->buf[4] == '-') ? 4 : 7;
         }
-      else if (TOUPPER(operand->buf[6]) == '%')
+      else if (TOUPPER (operand->buf[6]) == '%')
         {
-          mod = (operand->buf[4] == '-' ? 9 : 11);
+          mod = (operand->buf[4] == '-') ? 9 : 11;
         }
       else
         {
-          as_bad(_("Unrecognized indirect address format \"%s\""),
-                 operand->buf);
+          as_bad (_("Unrecognized indirect address format \"%s\""),
+                  operand->buf);
           return 0;
         }
     }
 
   insn->opcode[0].word |= 0x80 | (mod << 3) | arf;
+
   return 1;
 }
 
@@ -4169,62 +4377,57 @@ encode_integer (tic54x_insn *insn,
 		int max,
 		unsigned short mask)
 {
-  long parse, integer;
+  long integer;
 
-  if (!insn || !operand || which < 0) {
+  if (!insn || !operand) {
     return 0;
   }
 
   insn->opcode[which].addr_expr = operand->exp;
 
-  if (operand->exp.X_op == O_constant)
-    {
-      parse = operand->exp.X_add_number;
-      
-      if ((parse & 0x8000) && min == -32768 && max == 32767)
-	integer = (short) parse;
-      else
-	integer = parse;
+  if (operand->exp.X_op == O_constant) {
+    integer = operand->exp.X_add_number;
+    
+    if ((integer & 0x8000) && min == -32768 && max == 32767) {
+      integer = (short) integer;
+    }
 
-      if (integer >= min && integer <= max)
-	{
-	  insn->opcode[which].word |= (integer & mask);
-	  return 1;
-	}
+    if (integer < min || integer > max) {
       as_bad (_("Operand '%s' out of range (%d <= x <= %d)"),
-	      operand->buf, min, max);
+              operand->buf, min, max);
       return 0;
     }
+    
+    insn->opcode[which].word |= (integer & mask);
+    return 1;
+  }
 
-  if (insn->opcode[which].addr_expr.X_op == O_constant)
-    {
-      insn->opcode[which].word |=
-	insn->opcode[which].addr_expr.X_add_number & mask;
-      return 1;
-    }
+  if (insn->opcode[which].addr_expr.X_op == O_constant) {
+    insn->opcode[which].word |=
+      insn->opcode[which].addr_expr.X_add_number & mask;
+    return 1;
+  }
 
   bfd_reloc_code_real_type rtype;
   int size;
 
-  if (mask == 0x1FF) {
-    rtype = BFD_RELOC_TIC54X_PARTMS9;
-    size = 2;
-  } else if (mask == 0xFFFF) {
-    rtype = BFD_RELOC_TIC54X_16_OF_23;
-    size = 2;
-  } else if (mask == 0x7F) {
-    rtype = BFD_RELOC_TIC54X_PARTLS7;
-    size = 1;
-  } else {
-    rtype = BFD_RELOC_8;
-    size = 1;
-  }
-
-  if (rtype == BFD_RELOC_8)
-    {
+  switch (mask) {
+    case 0x1FF:
+      rtype = BFD_RELOC_TIC54X_PARTMS9;
+      size = 2;
+      break;
+    case 0xFFFF:
+      rtype = BFD_RELOC_TIC54X_16_OF_23;
+      size = 2;
+      break;
+    case 0x7F:
+      rtype = BFD_RELOC_TIC54X_PARTLS7;
+      size = 1;
+      break;
+    default:
       as_bad (_("Error in relocation handling"));
       return 0;
-    }
+  }
 
   insn->opcode[which].r_nchars = size;
   insn->opcode[which].r_type = rtype;
@@ -4243,71 +4446,92 @@ encode_condition (tic54x_insn *insn, struct opstruct *operand)
       return 0;
     }
 
-  if ((insn->opcode[0].word & 0xFF) == 0)
+  enum {
+    CC_GROUP = 0x40,
+    CC_ACC   = 0x08,
+    CATG_A1  = 0x07,
+    CATG_B1  = 0x30,
+    CATG_A2  = 0x30,
+    CATG_B2  = 0x0C,
+    CATG_C2  = 0x03
+  };
+
+  unsigned int opcode_word = insn->opcode[0].word;
+  unsigned int cc_value = cc->value;
+  
+  if ((opcode_word & 0xFF) == 0)
     {
-      insn->opcode[0].word |= cc->value;
+      insn->opcode[0].word |= cc_value;
       return 1;
     }
 
-  if ((insn->opcode[0].word & 0x40) != (cc->value & 0x40))
+  if ((opcode_word & CC_GROUP) != (cc_value & CC_GROUP))
     {
       as_bad (_("Condition \"%s\" does not match preceding group"),
               operand->buf);
       return 0;
     }
 
-  if (insn->opcode[0].word & 0x40)
+  if (opcode_word & CC_GROUP)
     {
-      if ((insn->opcode[0].word & 0x08) != (cc->value & 0x08))
+      if ((opcode_word & CC_ACC) != (cc_value & CC_ACC))
         {
           as_bad (_("Condition \"%s\" uses a different accumulator from "
                     "a preceding condition"),
                   operand->buf);
           return 0;
         }
-      if ((insn->opcode[0].word & 0x07) && (cc->value & 0x07))
+      if ((opcode_word & CATG_A1) && (cc_value & CATG_A1))
         {
           as_bad (_("Only one comparison conditional allowed"));
           return 0;
         }
-      if ((insn->opcode[0].word & 0x30) && (cc->value & 0x30))
+      if ((opcode_word & CATG_B1) && (cc_value & CATG_B1))
         {
           as_bad (_("Only one overflow conditional allowed"));
           return 0;
         }
     }
-  else if (   ((insn->opcode[0].word & 0x30) && (cc->value & 0x30))
-           || ((insn->opcode[0].word & 0x0C) && (cc->value & 0x0C))
-           || ((insn->opcode[0].word & 0x03) && (cc->value & 0x03)))
+  else
     {
-      as_bad (_("Duplicate %s conditional"), operand->buf);
-      return 0;
+      if (((opcode_word & CATG_A2) && (cc_value & CATG_A2)) ||
+          ((opcode_word & CATG_B2) && (cc_value & CATG_B2)) ||
+          ((opcode_word & CATG_C2) && (cc_value & CATG_C2)))
+        {
+          as_bad (_("Duplicate %s conditional"), operand->buf);
+          return 0;
+        }
     }
 
-  insn->opcode[0].word |= cc->value;
+  insn->opcode[0].word |= cc_value;
   return 1;
 }
 
 static int
 encode_cc3 (tic54x_insn *insn, struct opstruct *operand)
 {
-  if (!insn || !operand)
+  tic54x_symbol *cc3;
+  int value;
+
+  if (insn == NULL || operand == NULL || operand->buf == NULL)
     return 0;
 
-  int value;
-  tic54x_symbol *cc3 = str_hash_find (cc3_hash, operand->buf);
-  
-  if (cc3)
-    value = cc3->value;
+  cc3 = str_hash_find (cc3_hash, operand->buf);
+  if (cc3 != NULL)
+    {
+      value = cc3->value;
+    }
   else
-    value = operand->exp.X_add_number << 8;
+    {
+      value = operand->exp.X_add_number << 8;
+    }
 
   if ((value & 0x0300) != value)
     {
       as_bad (_("Unrecognized condition code \"%s\""), operand->buf);
       return 0;
     }
-  
+
   insn->opcode[0].word |= value;
   return 1;
 }
@@ -4315,47 +4539,52 @@ encode_cc3 (tic54x_insn *insn, struct opstruct *operand)
 static int
 encode_arx (tic54x_insn *insn, struct opstruct *operand)
 {
-  int arf;
+  if (operand == NULL || operand->buf == NULL || insn == NULL)
+    {
+      return 0;
+    }
 
-  if (!operand || !operand->buf)
+  size_t buf_len = strlen (operand->buf);
+  
+  if (buf_len < 3)
     {
       as_bad (_("Invalid auxiliary register (use AR0-AR7)"));
       return 0;
     }
 
-  if (strlen (operand->buf) < 3 || strncasecmp ("ar", operand->buf, 2))
+  if (strncasecmp ("ar", operand->buf, 2) != 0)
     {
       as_bad (_("Invalid auxiliary register (use AR0-AR7)"));
       return 0;
     }
 
-  arf = operand->buf[2] - '0';
-  if (arf < 0 || arf > 7)
+  char digit = operand->buf[2];
+  
+  if (digit < '0' || digit > '7')
     {
       as_bad (_("Invalid auxiliary register (use AR0-AR7)"));
       return 0;
     }
 
+  int arf = digit - '0';
   insn->opcode[0].word |= arf;
   return 1;
 }
 
-static int
-encode_cc2 (tic54x_insn *insn, struct opstruct *operand)
+static int encode_cc2(tic54x_insn *insn, struct opstruct *operand)
 {
-  tic54x_symbol *cc2;
-  
-  if (!insn || !operand || !operand->buf)
-    return 0;
-    
-  cc2 = str_hash_find (cc2_hash, operand->buf);
-  if (!cc2)
-    {
-      as_bad (_("Unrecognized condition code \"%s\""), operand->buf);
-      return 0;
+    if (insn == NULL || operand == NULL || operand->buf == NULL) {
+        return 0;
     }
-  insn->opcode[0].word |= cc2->value;
-  return 1;
+
+    tic54x_symbol *cc2 = str_hash_find(cc2_hash, operand->buf);
+    if (cc2 == NULL) {
+        as_bad(_("Unrecognized condition code \"%s\""), operand->buf);
+        return 0;
+    }
+
+    insn->opcode[0].word |= cc2->value;
+    return 1;
 }
 
 static int
@@ -4383,9 +4612,20 @@ encode_operand (tic54x_insn *insn, enum optype type, struct opstruct *operand)
   switch (type)
     {
     case OP_None:
+    case OP_B:
+    case OP_A:
+    case OP_16:
+    case OP_T:
+    case OP_TS:
+    case OP_ASM:
+    case OP_TRN:
+    case OP_DP:
+    case OP_ARP:
       return 1;
+
     case OP_dmad:
       return encode_dmad (insn, operand, 0);
+
     case OP_SRC:
       if (TOUPPER (*operand->buf) == 'B')
 	{
@@ -4395,15 +4635,20 @@ encode_operand (tic54x_insn *insn, enum optype type, struct opstruct *operand)
 	    insn->opcode[word_idx].word |= (1 << 8);
 	}
       return 1;
+
     case OP_RND:
-      if (!((TOUPPER (operand->buf[0]) == 'B') ^
-	    ((insn->opcode[0].word & (1 << 8)) != 0)))
-	{
-	  as_bad (_("Destination accumulator for each part of this parallel "
-		    "instruction must be different"));
-	  return 0;
-	}
+      {
+	int is_b_acc = (TOUPPER (operand->buf[0]) == 'B');
+	int has_bit8 = ((insn->opcode[0].word & (1 << 8)) != 0);
+	if (!(is_b_acc ^ has_bit8))
+	  {
+	    as_bad (_("Destination accumulator for each part of this parallel "
+		      "instruction must be different"));
+	    return 0;
+	  }
+      }
       return 1;
+
     case OP_SRC1:
     case OP_DST:
       if (TOUPPER (operand->buf[0]) == 'B')
@@ -4412,38 +4657,54 @@ encode_operand (tic54x_insn *insn, enum optype type, struct opstruct *operand)
 	  insn->opcode[word_idx].word |= (1 << 8);
 	}
       return 1;
+
     case OP_Xmem:
     case OP_Ymem:
       {
-	int mod = (operand->buf[4] == '\0' ? 0 :
-		   operand->buf[4] == '-' ? 1 :
-		   operand->buf[5] == '\0' ? 2 : 3);
+	int mod = 0;
 	int arf = operand->buf[3] - '0' - 2;
-	int code = (mod << 2) | arf;
-	insn->opcode[0].word |= (code << (type == OP_Xmem ? 4 : 0));
+	int shift = (type == OP_Xmem) ? 4 : 0;
+	
+	if (operand->buf[4] == '\0')
+	  mod = 0;
+	else if (operand->buf[4] == '-')
+	  mod = 1;
+	else if (operand->buf[5] == '\0')
+	  mod = 2;
+	else
+	  mod = 3;
+	
+	insn->opcode[0].word |= ((mod << 2) | arf) << shift;
 	return 1;
       }
+
     case OP_Lmem:
     case OP_Smem:
       if (!is_indirect (operand))
 	return encode_address (insn, operand);
+      return encode_indirect (insn, operand);
+
     case OP_Sind:
       return encode_indirect (insn, operand);
+
     case OP_xpmad_ms7:
       return encode_dmad (insn, operand, 2);
+
     case OP_xpmad:
       return encode_dmad (insn, operand, 1);
+
     case OP_PA:
     case OP_pmad:
       return encode_dmad (insn, operand, 0);
+
     case OP_ARX:
       return encode_arx (insn, operand);
+
     case OP_MMRX:
     case OP_MMRY:
     case OP_MMR:
       {
 	int value = operand->exp.X_add_number;
-
 	if (type == OP_MMR)
 	  {
 	    insn->opcode[0].word |= value;
@@ -4456,55 +4717,65 @@ encode_operand (tic54x_insn *insn, enum optype type, struct opstruct *operand)
 			operand->buf);
 		return 0;
 	      }
+	    int offset = value - 16;
 	    if (type == OP_MMRX)
-	      insn->opcode[0].word |= (value - 16) << 4;
+	      insn->opcode[0].word |= offset << 4;
 	    else
-	      insn->opcode[0].word |= (value - 16);
+	      insn->opcode[0].word |= offset;
 	  }
 	return 1;
       }
-    case OP_B:
-    case OP_A:
-      return 1;
+
     case OP_SHFT:
       return encode_integer (insn, operand, ext + insn->is_lkaddr,
 			     0, 15, 0xF);
+
     case OP_SHIFT:
       return encode_integer (insn, operand, ext + insn->is_lkaddr,
 			     -16, 15, 0x1F);
+
     case OP_lk:
       return encode_integer (insn, operand, 1 + insn->is_lkaddr,
 			     -32768, 32767, 0xFFFF);
+
     case OP_CC:
       return encode_condition (insn, operand);
+
     case OP_CC2:
       return encode_cc2 (insn, operand);
+
     case OP_CC3:
       return encode_cc3 (insn, operand);
+
     case OP_BITC:
       return encode_integer (insn, operand, 0, 0, 15, 0xF);
+
     case OP_k8:
       return encode_integer (insn, operand, 0, -128, 127, 0xFF);
+
     case OP_123:
       {
 	int value = operand->exp.X_add_number;
-	int code;
 	if (value < 1 || value > 3)
 	  {
 	    as_bad (_("Invalid operand (use 1, 2, or 3)"));
 	    return 0;
 	  }
-	code = value == 1 ? 0 : value == 2 ? 0x2 : 0x1;
+	int code = (value == 1) ? 0 : ((value == 2) ? 0x2 : 0x1);
 	insn->opcode[0].word |= (code << 8);
 	return 1;
       }
+
     case OP_031:
       return encode_integer (insn, operand, 0, 0, 31, 0x1F);
+
     case OP_k8u:
       return encode_integer (insn, operand, 0, 0, 255, 0xFF);
+
     case OP_lku:
       return encode_integer (insn, operand, 1 + insn->is_lkaddr,
 			     0, 65535, 0xFFFF);
+
     case OP_SBIT:
       {
 	tic54x_symbol *sbit = str_hash_find (sbit_hash, operand->buf);
@@ -4519,7 +4790,8 @@ encode_operand (tic54x_insn *insn, enum optype type, struct opstruct *operand)
 		as_bad (_("A status register or status bit name is required"));
 		return 0;
 	      }
-	    if (sbit > (tic54x_symbol *) str_hash_find (sbit_hash, "ovb"))
+	    tic54x_symbol *ovb = str_hash_find (sbit_hash, "ovb");
+	    if (sbit > ovb)
 	      reg = 1;
 	  }
 	if (value == -1)
@@ -4531,6 +4803,7 @@ encode_operand (tic54x_insn *insn, enum optype type, struct opstruct *operand)
 	insn->opcode[0].word |= (reg << 9);
 	return 1;
       }
+
     case OP_N:
       if (strcasecmp (operand->buf, "st0") == 0
 	  || strcasecmp (operand->buf, "st1") == 0)
@@ -4538,21 +4811,25 @@ encode_operand (tic54x_insn *insn, enum optype type, struct opstruct *operand)
 	  insn->opcode[0].word |= ((uint16_t) (operand->buf[2] - '0')) << 9;
 	  return 1;
 	}
-      else if (operand->exp.X_op == O_constant
-	       && (operand->exp.X_add_number == 0
-		   || operand->exp.X_add_number == 1))
+      if (operand->exp.X_op == O_constant
+	  && (operand->exp.X_add_number == 0
+	      || operand->exp.X_add_number == 1))
 	{
 	  insn->opcode[0].word |= ((uint16_t) (operand->exp.X_add_number)) << 9;
 	  return 1;
 	}
       as_bad (_("Invalid status register \"%s\""), operand->buf);
       return 0;
+
     case OP_k5:
       return encode_integer (insn, operand, 0, -16, 15, 0x1F);
+
     case OP_k3:
       return encode_integer (insn, operand, 0, 0, 7, 0x7);
+
     case OP_k9:
       return encode_integer (insn, operand, 0, 0, 0x1FF, 0x1FF);
+
     case OP_12:
       if (operand->exp.X_add_number != 1
 	  && operand->exp.X_add_number != 2)
@@ -4562,14 +4839,7 @@ encode_operand (tic54x_insn *insn, enum optype type, struct opstruct *operand)
 	}
       insn->opcode[0].word |= (operand->exp.X_add_number - 1) << 9;
       return 1;
-    case OP_16:
-    case OP_T:
-    case OP_TS:
-    case OP_ASM:
-    case OP_TRN:
-    case OP_DP:
-    case OP_ARP:
-      return 1;
+
     default:
       return 0;
     }
@@ -4578,44 +4848,68 @@ encode_operand (tic54x_insn *insn, enum optype type, struct opstruct *operand)
 static void
 emit_insn (tic54x_insn *insn)
 {
-  int i;
-  flagword oldflags;
-  flagword flags;
-
-  if (!insn) {
-    as_warn (_("invalid instruction"));
-    return;
-  }
-
-  oldflags = bfd_section_flags (now_seg);
-  flags = oldflags | SEC_CODE;
+  flagword oldflags = bfd_section_flags (now_seg);
+  flagword flags = oldflags | SEC_CODE;
 
   if (!bfd_set_section_flags (now_seg, flags))
-        as_warn (_("error setting flags for \"%s\": %s"),
-                 bfd_section_name (now_seg),
-                 bfd_errmsg (bfd_get_error ()));
-
-  for (i = 0; i < insn->words; i++)
     {
-      int size = (insn->opcode[i].unresolved
-		  && insn->opcode[i].r_type == BFD_RELOC_TIC54X_23) ? 4 : 2;
-      char *p = frag_more (size);
-
-      if (!p) {
-        as_warn (_("failed to allocate fragment"));
-        return;
-      }
-
-      if (size == 2)
-	md_number_to_chars (p, insn->opcode[i].word, 2);
-      else
-	md_number_to_chars (p, (valueT) insn->opcode[i].word << 16, 4);
-
-      if (insn->opcode[i].unresolved)
-	fix_new_exp (frag_now, p - frag_now->fr_literal,
-		     insn->opcode[i].r_nchars, &insn->opcode[i].addr_expr,
-		     false, insn->opcode[i].r_type);
+      as_warn (_("error setting flags for \"%s\": %s"),
+               bfd_section_name (now_seg),
+               bfd_errmsg (bfd_get_error ()));
     }
+
+  for (int i = 0; i < insn->words; i++)
+    {
+      emit_single_word (insn, i);
+    }
+}
+
+static void
+emit_single_word (tic54x_insn *insn, int index)
+{
+  int size = calculate_word_size (&insn->opcode[index]);
+  char *p = frag_more (size);
+
+  write_word_to_buffer (p, insn->opcode[index].word, size);
+
+  if (insn->opcode[index].unresolved)
+    {
+      create_fixup (p, &insn->opcode[index]);
+    }
+}
+
+static int
+calculate_word_size (const tic54x_opcode *opcode)
+{
+  if (opcode->unresolved && opcode->r_type == BFD_RELOC_TIC54X_23)
+    {
+      return 4;
+    }
+  return 2;
+}
+
+static void
+write_word_to_buffer (char *buffer, valueT word, int size)
+{
+  if (size == 2)
+    {
+      md_number_to_chars (buffer, word, 2);
+    }
+  else
+    {
+      md_number_to_chars (buffer, word << 16, 4);
+    }
+}
+
+static void
+create_fixup (char *position, const tic54x_opcode *opcode)
+{
+  fix_new_exp (frag_now, 
+               position - frag_now->fr_literal,
+               opcode->r_nchars, 
+               &opcode->addr_expr,
+               false, 
+               opcode->r_type);
 }
 
 /* Convert the operand strings into appropriate opcode values
@@ -4624,179 +4918,123 @@ emit_insn (tic54x_insn *insn)
 static int
 build_insn (tic54x_insn *insn)
 {
-  int i;
+  if (!insn || !insn->tm)
+    return 0;
 
   if (!(insn->tm->flags & FL_PAR))
     {
-      for (i = 0; i < insn->opcount; i++)
-	{
-	  enum optype operand_type = OPTYPE (insn->operands[i].type);
-	  if ((operand_type == OP_Smem || operand_type == OP_Lmem || operand_type == OP_Sind)
-	      && strchr (insn->operands[i].buf, '(') != NULL
-	      && strncasecmp (insn->operands[i].buf, "*sp (", 4) != 0)
-	    {
-	      insn->is_lkaddr = 1;
-	      insn->lkoperand = i;
-	      break;
-	    }
-	}
+      for (int i = 0; i < insn->opcount; i++)
+        {
+          enum optype op_type = OPTYPE(insn->operands[i].type);
+          if ((op_type == OP_Smem || op_type == OP_Lmem || op_type == OP_Sind) &&
+              strchr(insn->operands[i].buf, '(') &&
+              strncasecmp(insn->operands[i].buf, "*sp (", 5) != 0)
+            {
+              insn->is_lkaddr = 1;
+              insn->lkoperand = i;
+              break;
+            }
+        }
     }
-  
-  insn->words = insn->tm->words + insn->is_lkaddr;
 
+  insn->words = insn->tm->words + insn->is_lkaddr;
   insn->opcode[0].word = insn->tm->opcode;
+
   if (insn->tm->flags & FL_EXT)
     insn->opcode[1 + insn->is_lkaddr].word = insn->tm->opcode2;
 
-  for (i = 0; i < insn->opcount; i++)
+  for (int i = 0; i < insn->opcount; i++)
     {
-      if (!encode_operand (insn, insn->operands[i].type, &insn->operands[i]))
-	return 0;
+      if (!encode_operand(insn, insn->operands[i].type, &insn->operands[i]))
+        return 0;
     }
-  
+
   if (insn->tm->flags & FL_PAR)
     {
-      for (i = 0; i < insn->paropcount; i++)
-	{
-	  if (!encode_operand (insn, insn->paroperands[i].type, &insn->paroperands[i]))
-	    return 0;
-	}
+      for (int i = 0; i < insn->paropcount; i++)
+        {
+          if (!encode_operand(insn, insn->paroperands[i].type, &insn->paroperands[i]))
+            return 0;
+        }
     }
 
-  emit_insn (insn);
-
+  emit_insn(insn);
   return insn->words;
 }
 
 static int
-is_zero_operand(const tic54x_operand *op)
+optimize_insn (tic54x_insn *insn)
 {
-    return (op->exp.X_op == O_constant && op->exp.X_add_number == 0);
-}
+  #define is_zero(op) ((op).exp.X_op == O_constant && (op).exp.X_add_number == 0)
+  
+  if (!insn || !insn->tm || !insn->tm->name) {
+    return 0;
+  }
 
-static int
-can_remove_zero_shift(tic54x_insn *insn, int shift_idx)
-{
-    if (shift_idx >= insn->opcount || shift_idx < 0)
-        return 0;
-    
-    int shift_type = OPTYPE(insn->tm->operand_types[shift_idx]);
-    return ((shift_type == OP_SHIFT || shift_type == OP_SHFT) && 
-            is_zero_operand(&insn->operands[shift_idx]));
-}
-
-static int
-optimize_add_instruction(tic54x_insn *insn)
-{
-    if (insn->opcount > 1 &&
-        is_accumulator(&insn->operands[insn->opcount - 2]) &&
-        is_accumulator(&insn->operands[insn->opcount - 1]) &&
-        strcasecmp(insn->operands[insn->opcount - 2].buf,
-                   insn->operands[insn->opcount - 1].buf) == 0)
-    {
+  const char *name = insn->tm->name;
+  
+  if (strcasecmp(name, "add") == 0 || strcasecmp(name, "sub") == 0) {
+    if (insn->opcount > 1) {
+      int idx1 = insn->opcount - 2;
+      int idx2 = insn->opcount - 1;
+      
+      if (is_accumulator(&insn->operands[idx1]) &&
+          is_accumulator(&insn->operands[idx2]) &&
+          strcasecmp(insn->operands[idx1].buf, insn->operands[idx2].buf) == 0) {
         --insn->opcount;
         insn->using_default_dst = 1;
         return 1;
+      }
     }
 
-    if ((OPTYPE(insn->tm->operand_types[0]) == OP_Xmem &&
-         OPTYPE(insn->tm->operand_types[1]) == OP_SHFT &&
-         is_zero_operand(&insn->operands[1])) ||
-        (OPTYPE(insn->tm->operand_types[0]) == OP_Smem &&
-         OPTYPE(insn->tm->operand_types[1]) == OP_SHIFT &&
-         is_type(&insn->operands[1], OP_SHIFT) &&
-         is_zero_operand(&insn->operands[1]) && 
-         insn->opcount == 3))
-    {
+    if (strcasecmp(name, "add") == 0) {
+      if ((OPTYPE(insn->tm->operand_types[0]) == OP_Xmem &&
+           OPTYPE(insn->tm->operand_types[1]) == OP_SHFT &&
+           is_zero(insn->operands[1])) ||
+          (OPTYPE(insn->tm->operand_types[0]) == OP_Smem &&
+           OPTYPE(insn->tm->operand_types[1]) == OP_SHIFT &&
+           is_type(&insn->operands[1], OP_SHIFT) &&
+           is_zero(insn->operands[1]) && insn->opcount == 3)) {
         insn->operands[1] = insn->operands[2];
         insn->opcount = 2;
         return 1;
-    }
-
-    return 0;
-}
-
-static int
-optimize_ld_instruction(tic54x_insn *insn)
-{
-    if (insn->opcount != 3 || insn->operands[0].type == OP_SRC)
-        return 0;
-
-    if (can_remove_zero_shift(insn, 1) &&
-        (OPTYPE(insn->tm->operand_types[0]) != OP_lk ||
-         (insn->operands[0].exp.X_op == O_constant &&
-          insn->operands[0].exp.X_add_number <= 255 &&
-          insn->operands[0].exp.X_add_number >= 0)))
-    {
+      }
+    } else {
+      if (((OPTYPE(insn->tm->operand_types[0]) == OP_Smem &&
+            OPTYPE(insn->tm->operand_types[1]) == OP_SHIFT) ||
+           (OPTYPE(insn->tm->operand_types[0]) == OP_Xmem &&
+            OPTYPE(insn->tm->operand_types[1]) == OP_SHFT)) &&
+          is_zero(insn->operands[1]) && insn->opcount == 3) {
         insn->operands[1] = insn->operands[2];
         insn->opcount = 2;
         return 1;
+      }
     }
-
-    return 0;
-}
-
-static int
-optimize_sth_stl_instruction(tic54x_insn *insn)
-{
-    if (can_remove_zero_shift(insn, 1))
-    {
+  } else if (strcasecmp(name, "ld") == 0) {
+    if (insn->opcount == 3 && insn->operands[0].type != OP_SRC) {
+      if ((OPTYPE(insn->tm->operand_types[1]) == OP_SHIFT ||
+           OPTYPE(insn->tm->operand_types[1]) == OP_SHFT) &&
+          is_zero(insn->operands[1]) &&
+          (OPTYPE(insn->tm->operand_types[0]) != OP_lk ||
+           (insn->operands[0].exp.X_op == O_constant &&
+            insn->operands[0].exp.X_add_number <= 255 &&
+            insn->operands[0].exp.X_add_number >= 0))) {
         insn->operands[1] = insn->operands[2];
         insn->opcount = 2;
         return 1;
+      }
     }
-    return 0;
-}
-
-static int
-optimize_sub_instruction(tic54x_insn *insn)
-{
-    if (insn->opcount > 1 &&
-        is_accumulator(&insn->operands[insn->opcount - 2]) &&
-        is_accumulator(&insn->operands[insn->opcount - 1]) &&
-        strcasecmp(insn->operands[insn->opcount - 2].buf,
-                   insn->operands[insn->opcount - 1].buf) == 0)
-    {
-        --insn->opcount;
-        insn->using_default_dst = 1;
-        return 1;
+  } else if (strcasecmp(name, "sth") == 0 || strcasecmp(name, "stl") == 0) {
+    if ((OPTYPE(insn->tm->operand_types[1]) == OP_SHIFT ||
+         OPTYPE(insn->tm->operand_types[1]) == OP_SHFT) &&
+        is_zero(insn->operands[1])) {
+      insn->operands[1] = insn->operands[2];
+      insn->opcount = 2;
+      return 1;
     }
-
-    if (((OPTYPE(insn->tm->operand_types[0]) == OP_Smem &&
-          OPTYPE(insn->tm->operand_types[1]) == OP_SHIFT) ||
-         (OPTYPE(insn->tm->operand_types[0]) == OP_Xmem &&
-          OPTYPE(insn->tm->operand_types[1]) == OP_SHFT)) &&
-        is_zero_operand(&insn->operands[1]) &&
-        insn->opcount == 3)
-    {
-        insn->operands[1] = insn->operands[2];
-        insn->opcount = 2;
-        return 1;
-    }
-
-    return 0;
-}
-
-static int
-optimize_insn(tic54x_insn *insn)
-{
-    if (!insn || !insn->tm || !insn->tm->name)
-        return 0;
-
-    if (strcasecmp(insn->tm->name, "add") == 0)
-        return optimize_add_instruction(insn);
-    
-    if (strcasecmp(insn->tm->name, "ld") == 0)
-        return optimize_ld_instruction(insn);
-    
-    if (strcasecmp(insn->tm->name, "sth") == 0 ||
-        strcasecmp(insn->tm->name, "stl") == 0)
-        return optimize_sth_stl_instruction(insn);
-    
-    if (strcasecmp(insn->tm->name, "sub") == 0)
-        return optimize_sub_instruction(insn);
-
-    return 0;
+  }
+  
+  return 0;
 }
 
 /* Find a matching template if possible, and get the operand strings.  */
@@ -4804,7 +5042,7 @@ optimize_insn(tic54x_insn *insn)
 static int
 tic54x_parse_insn (tic54x_insn *insn, char *line)
 {
-  if (!insn || !line)
+  if (!insn || !line || !insn->mnemonic)
     return 0;
 
   insn->tm = str_hash_find (op_hash, insn->mnemonic);
@@ -4818,30 +5056,40 @@ tic54x_parse_insn (tic54x_insn *insn, char *line)
   if (insn->opcount < 0)
     return 0;
 
+  const void *initial_tm = insn->tm;
+  
   while (insn->tm->name && strcasecmp (insn->tm->name, insn->mnemonic) == 0)
     {
-      if (insn->opcount >= insn->tm->minops
-	  && insn->opcount <= insn->tm->maxops
-	  && operands_match (insn, &insn->operands[0], insn->opcount,
-			     insn->tm->operand_types,
-			     insn->tm->minops, insn->tm->maxops))
-	{
-	  if (optimize_insn (insn))
-	    {
-	      insn->tm = str_hash_find (op_hash, insn->mnemonic);
-	      if (!insn->tm)
-		{
-		  as_bad (_("Instruction optimization failed for \"%s\""), insn->mnemonic);
-		  return 0;
-		}
-	      continue;
-	    }
-	  return 1;
-	}
-      ++(insn->tm);
+      if (insn->opcount < insn->tm->minops || insn->opcount > insn->tm->maxops)
+        {
+          ++(insn->tm);
+          continue;
+        }
+      
+      if (!operands_match (insn, &insn->operands[0], insn->opcount,
+                          insn->tm->operand_types,
+                          insn->tm->minops, insn->tm->maxops))
+        {
+          ++(insn->tm);
+          continue;
+        }
+      
+      if (optimize_insn (insn))
+        {
+          insn->tm = str_hash_find (op_hash, insn->mnemonic);
+          if (!insn->tm)
+            {
+              insn->tm = initial_tm;
+              break;
+            }
+          continue;
+        }
+      
+      return 1;
     }
+  
   as_bad (_("Unrecognized operand list '%s' for instruction '%s'"),
-	  line, insn->mnemonic);
+          line, insn->mnemonic);
   return 0;
 }
 
@@ -4852,24 +5100,27 @@ static int parallel_on_next_line_hint = 0;
 /* See if this is part of a parallel instruction
    Look for a subsequent line starting with "||".  */
 
-static int
-next_line_shows_parallel(char *next_line)
+static int next_line_shows_parallel(char *next_line)
 {
-    if (!next_line) {
+    if (next_line == NULL) {
         return 0;
     }
-    
-    while (*next_line != '\0' && (is_whitespace(*next_line) || is_end_of_stmt(*next_line))) {
-        ++next_line;
+
+    while (*next_line != '\0') {
+        if (!is_whitespace(*next_line) && !is_end_of_stmt(*next_line)) {
+            break;
+        }
+        next_line++;
     }
 
-    return (next_line[0] == PARALLEL_SEPARATOR && next_line[1] == PARALLEL_SEPARATOR);
+    return next_line[0] == PARALLEL_SEPARATOR && 
+           next_line[1] == PARALLEL_SEPARATOR;
 }
 
 static int
 tic54x_parse_parallel_insn_firstline (tic54x_insn *insn, char *line)
 {
-  if (!insn || !line)
+  if (!insn || !line || !insn->mnemonic)
     return 0;
 
   insn->tm = str_hash_find (parop_hash, insn->mnemonic);
@@ -4880,7 +5131,8 @@ tic54x_parse_parallel_insn_firstline (tic54x_insn *insn, char *line)
       return 0;
     }
 
-  while (insn->tm->name && strcasecmp (insn->tm->name, insn->mnemonic) == 0)
+  while (insn->tm && insn->tm->name && 
+         strcasecmp (insn->tm->name, insn->mnemonic) == 0)
     {
       insn->opcount = get_operands (insn->operands, line);
       if (insn->opcount < 0)
@@ -4892,8 +5144,10 @@ tic54x_parse_parallel_insn_firstline (tic54x_insn *insn, char *line)
         {
           return 1;
         }
-      ++(insn->tm);
+      
+      insn->tm++;
     }
+  
   return 0;
 }
 
@@ -4904,34 +5158,40 @@ tic54x_parse_parallel_insn_lastline (tic54x_insn *insn, char *line)
 {
   int valid_mnemonic = 0;
 
-  if (!insn || !line)
+  if (insn == NULL || line == NULL) {
     return 0;
+  }
 
   insn->paropcount = get_operands (insn->paroperands, line);
   
-  while (insn->tm && insn->tm->name && strcasecmp (insn->tm->name, insn->mnemonic) == 0)
+  while (insn->tm != NULL && insn->tm->name != NULL && 
+         strcasecmp (insn->tm->name, insn->mnemonic) == 0)
     {
-      if (insn->tm->parname && strcasecmp (insn->tm->parname, insn->parmnemonic) == 0)
+      if (insn->tm->parname != NULL && 
+          strcasecmp (insn->tm->parname, insn->parmnemonic) == 0)
         {
           valid_mnemonic = 1;
 
-          if (insn->paropcount >= insn->tm->minops
-              && insn->paropcount <= insn->tm->maxops
-              && operands_match (insn, insn->paroperands,
-                                 insn->paropcount,
-                                 insn->tm->paroperand_types,
-                                 insn->tm->minops, insn->tm->maxops))
-            return 1;
+          if (insn->paropcount >= insn->tm->minops &&
+              insn->paropcount <= insn->tm->maxops &&
+              operands_match (insn, insn->paroperands,
+                             insn->paropcount,
+                             insn->tm->paroperand_types,
+                             insn->tm->minops, insn->tm->maxops))
+            {
+              return 1;
+            }
         }
-      insn->tm++;
+      ++(insn->tm);
     }
-  
-  if (valid_mnemonic)
+    
+  if (valid_mnemonic) {
     as_bad (_("Invalid operand (s) for parallel instruction \"%s\""),
             insn->parmnemonic);
-  else
+  } else {
     as_bad (_("Unrecognized parallel instruction combination \"%s || %s\""),
             insn->mnemonic, insn->parmnemonic);
+  }
 
   return 0;
 }
@@ -4944,22 +5204,21 @@ tic54x_parse_parallel_insn_lastline (tic54x_insn *insn, char *line)
 static char *
 subsym_get_arg (char *line, const char *terminators, char **str, int nosub)
 {
+  if (!line || !terminators || !str)
+    return NULL;
+
   char *ptr = line;
-  char *endp;
-  int is_string = (*line == '"');
-  int is_char = ISDIGIT (*line);
+  char *endp = NULL;
+  *str = NULL;
 
-  if (!str)
-    return line;
-
-  if (is_char)
+  if (ISDIGIT (*line))
     {
       while (ISDIGIT (*ptr))
         ++ptr;
       endp = ptr;
       *str = xmemdup0 (line, ptr - line);
     }
-  else if (is_string)
+  else if (*line == '"')
     {
       char *savedp = input_line_pointer;
       int len;
@@ -4975,7 +5234,7 @@ subsym_get_arg (char *line, const char *terminators, char **str, int nosub)
   else
     {
       const char *term = terminators;
-
+      
       while (*ptr && *ptr != *term)
         {
           if (!*term)
@@ -4984,11 +5243,14 @@ subsym_get_arg (char *line, const char *terminators, char **str, int nosub)
               ++ptr;
             }
           else
-            ++term;
+            {
+              ++term;
+            }
         }
       endp = ptr;
       *str = xmemdup0 (line, ptr - line);
-      if (!nosub)
+      
+      if (!nosub && *str)
         {
           subsym_ent_t *ent = subsym_lookup (*str, macro_level);
           if (ent && !ent->isproc)
@@ -5007,30 +5269,31 @@ subsym_get_arg (char *line, const char *terminators, char **str, int nosub)
 static void
 subsym_create_or_replace (char *name, char *value)
 {
-  int i;
   subsym_ent_t *ent;
-  
-  if (!name || !value) {
+  int i;
+
+  if (name == NULL || value == NULL)
     return;
-  }
-  
+
   ent = xmalloc (sizeof (*ent));
-  if (!ent) {
+  if (ent == NULL)
     return;
-  }
-  
+
   ent->u.s = value;
   ent->freekey = 0;
   ent->freeval = 0;
   ent->isproc = 0;
   ent->ismath = 0;
 
-  for (i = macro_level; i > 0; i--) {
-    if (str_hash_find (subsym_hash[i], name)) {
-      str_hash_insert (subsym_hash[i], name, ent, 1);
-      return;
+  for (i = macro_level; i > 0; i--)
+    {
+      if (str_hash_find (subsym_hash[i], name))
+        {
+          str_hash_insert (subsym_hash[i], name, ent, 1);
+          return;
+        }
     }
-  }
+  
   str_hash_insert (subsym_hash[0], name, ent, 1);
 }
 
@@ -5041,16 +5304,15 @@ subsym_create_or_replace (char *name, char *value)
 static subsym_ent_t *
 subsym_lookup (char *name, int nest_level)
 {
-  if (!name || nest_level < 0)
+  if (name == NULL) {
     return NULL;
+  }
 
-  while (nest_level >= 0) {
-    void *value = str_hash_find (subsym_hash[nest_level], name);
-    if (value)
+  for (int level = nest_level; level >= 0; level--) {
+    void *value = str_hash_find (subsym_hash[level], name);
+    if (value != NULL) {
       return value;
-    if (nest_level == 0)
-      break;
-    nest_level--;
+    }
   }
 
   return NULL;
@@ -5073,39 +5335,31 @@ subsym_substitute (char *line, int forced)
   int eval_line = 0;
   int eval_symbol = 0;
   char *eval_end = NULL;
-  int recurse = 1;
   int line_conditional = 0;
-  char *tmp;
-  char current_char;
 
-  if (line == NULL)
-    return NULL;
+  if (strstr (line, ".if") || strstr (line, ".elseif") || strstr (line, ".break"))
+    line_conditional = 1;
 
-  line_conditional = (strstr (line, ".if") != NULL ||
-                     strstr (line, ".elseif") != NULL ||
-                     strstr (line, ".break") != NULL);
+  if (strstr (line, ".eval") || strstr (line, ".asg"))
+    eval_line = 1;
 
-  eval_line = (strstr (line, ".eval") != NULL ||
-              strstr (line, ".asg") != NULL);
-
-  if (strstr (line, ".macro") != NULL)
+  if (strstr (line, ".macro"))
     return line;
 
   replacement = xstrdup (line);
-  if (replacement == NULL)
-    return line;
-
   ptr = head = replacement;
 
-  while (!is_end_of_stmt (current_char = *ptr))
+  while (!is_end_of_stmt (*ptr))
     {
+      char current_char = *ptr;
+      
       if (eval_line)
         eval_end = strrchr (ptr, ',');
 
       if (current_char == '"' && ptr[1] == '"' && ptr[2] == '"')
         {
           ptr[1] = '\\';
-          tmp = strstr (ptr + 2, "\"\"\"");
+          char *tmp = strstr (ptr + 2, "\"\"\"");
           if (tmp)
             tmp[0] = '\\';
           changed = 1;
@@ -5118,10 +5372,8 @@ subsym_substitute (char *line, int forced)
               ptr += 2;
               continue;
             }
-          *ptr = '\0';
-          tmp = concat (head, "==", ptr + 1, (char *) NULL);
-          if (tmp == NULL)
-            break;
+          *ptr++ = '\0';
+          char *tmp = concat (head, "==", ptr, (char *) NULL);
           ptr = tmp + strlen (head) + 2;
           free (replacement);
           head = replacement = tmp;
@@ -5131,256 +5383,20 @@ subsym_substitute (char *line, int forced)
       if (eval_line && ptr >= eval_end)
         eval_symbol = 1;
 
-      if ((forced && current_char == ':') ||
-          (!forced && is_name_beginner (current_char)))
+      if ((forced && current_char == ':') || (!forced && is_name_beginner (current_char)))
         {
-          char *name;
-          char *savedp = input_line_pointer;
-          int c;
-          subsym_ent_t *ent = NULL;
-          char *value = NULL;
-          char *tail;
-
-          if (forced)
-            ++ptr;
-
-          input_line_pointer = ptr;
-          c = get_symbol_name (&name);
-
-          if (c == '?')
+          char *result = handle_symbol_substitution (&ptr, &head, &replacement, 
+                                                     forced, eval_symbol, &changed);
+          if (result != NULL)
             {
-              *input_line_pointer++ = c;
-              c = *input_line_pointer;
-              *input_line_pointer = '\0';
+              ptr = result;
+              continue;
             }
-
-          if (str_hash_find (subsym_recurse_hash, name) == NULL)
-            {
-              ent = subsym_lookup (name, macro_level);
-              if (ent && !ent->isproc)
-                value = ent->u.s;
-            }
-          else
-            as_warn (_("%s symbol recursion stopped at second appearance of '%s'"),
-                     forced ? "Forced substitution" : "Substitution", name);
-
-          ptr = tail = input_line_pointer;
-          input_line_pointer = savedp;
-
-          if ((*name == '$' && ISDIGIT (name[1]) && name[2] == '\0') ||
-              (strlen(name) > 0 && name[strlen (name) - 1] == '?'))
-            {
-              value = str_hash_find (local_label_hash[macro_level], name);
-              if (value == NULL)
-                {
-                  char digit[11];
-                  char *namecopy = xstrdup (name);
-                  size_t name_len = strlen (name);
-
-                  value = xmalloc (name_len + sizeof (digit) + 1);
-                  strcpy (value, name);
-                  
-                  if (*value != '$')
-                    value[name_len - 1] = '\0';
-                  
-                  sprintf (digit, ".%d", local_label_id++);
-                  strcat (value, digit);
-                  str_hash_insert (local_label_hash[macro_level], namecopy, value, 0);
-                }
-              ptr = tail;
-            }
-          else if (ent != NULL && *name == '$')
-            {
-              const subsym_proc_entry *entry = ent->u.p;
-              char *arg1, *arg2 = NULL;
-
-              *ptr = c;
-              if (!ent->isproc)
-                {
-                  as_bad (_("Unrecognized substitution symbol function"));
-                  break;
-                }
-              
-              if (*ptr != '(')
-                {
-                  as_bad (_("Missing '(' after substitution symbol function"));
-                  break;
-                }
-              
-              ++ptr;
-              
-              if (ent->ismath)
-                {
-                  float farg1, farg2 = 0;
-
-                  farg1 = (float) strtod (ptr, &ptr);
-                  if (entry->nargs == 2)
-                    {
-                      if (*ptr++ != ',')
-                        {
-                          as_bad (_("Expecting second argument"));
-                          break;
-                        }
-                      farg2 = (float) strtod (ptr, &ptr);
-                    }
-                  
-                  value = XNEWVEC (char, 128);
-                  if (entry->type == 2)
-                    {
-                      int result = (*entry->proc.i) (farg1, farg2);
-                      sprintf (value, "%d", result);
-                    }
-                  else
-                    {
-                      float result = (*entry->proc.f) (farg1, farg2);
-                      sprintf (value, "%f", result);
-                    }
-                  
-                  if (*ptr++ != ')')
-                    {
-                      as_bad (_("Extra junk in function call, expecting ')'"));
-                      break;
-                    }
-                  recurse = 0;
-                }
-              else
-                {
-                  int val;
-                  int arg_type[2] = { *ptr == '"', 0 };
-                  int ismember = !strcmp (entry->name, "$ismember");
-
-                  ptr = subsym_get_arg (ptr, ",)", &arg1, ismember);
-                  if (!arg1)
-                    break;
-                  
-                  if (entry->nargs == 2)
-                    {
-                      if (*ptr++ != ',')
-                        {
-                          as_bad (_("Function expects two arguments"));
-                          break;
-                        }
-                      arg_type[1] = (ISDIGIT (*ptr)) ? 2 : (*ptr == '"');
-                      ptr = subsym_get_arg (ptr, ")", &arg2, ismember);
-                    }
-                  
-                  if ((!strcmp (entry->name, "$firstch") ||
-                       !strcmp (entry->name, "$lastch")) &&
-                      arg_type[1] != 2)
-                    {
-                      as_bad (_("Expecting character constant argument"));
-                      break;
-                    }
-                  
-                  if (ismember && (arg_type[0] != 0 || arg_type[1] != 0))
-                    {
-                      as_bad (_("Both arguments must be substitution symbols"));
-                      break;
-                    }
-                  
-                  if (*ptr++ != ')')
-                    {
-                      as_bad (_("Extra junk in function call, expecting ')'"));
-                      break;
-                    }
-                  
-                  val = (*entry->proc.s) (arg1, arg2);
-                  value = XNEWVEC (char, 64);
-                  sprintf (value, "%d", val);
-                }
-              tail = ptr;
-              c = *tail;
-            }
-
-          if (value != NULL && !eval_symbol)
-            {
-              if (recurse)
-                {
-                  str_hash_insert (subsym_recurse_hash, name, name, 0);
-                  value = subsym_substitute (value, macro_level > 0);
-                  str_hash_delete (subsym_recurse_hash, name);
-                }
-
-              *name = 0;
-              
-              if (forced)
-                {
-                  if (c == '(')
-                    {
-                      unsigned beg, len = 1;
-                      char *newval = xstrdup (value);
-                      size_t value_len = strlen (value);
-
-                      savedp = input_line_pointer;
-                      input_line_pointer = tail + 1;
-                      beg = get_absolute_expression ();
-                      
-                      if (beg < 1)
-                        {
-                          as_bad (_("Invalid subscript (use 1 to %d)"), (int) value_len);
-                          break;
-                        }
-                      
-                      if (*input_line_pointer == ',')
-                        {
-                          ++input_line_pointer;
-                          len = get_absolute_expression ();
-                          if (beg + len > value_len)
-                            {
-                              as_bad (_("Invalid length (use 0 to %d)"), (int) value_len - beg);
-                              break;
-                            }
-                        }
-                      
-                      newval += beg - 1;
-                      newval[len] = 0;
-                      tail = input_line_pointer;
-                      
-                      if (*tail++ != ')')
-                        {
-                          as_bad (_("Missing ')' in subscripted substitution symbol expression"));
-                          break;
-                        }
-                      
-                      c = *tail;
-                      input_line_pointer = savedp;
-                      value = newval;
-                    }
-                  name[-1] = 0;
-                }
-              
-              size_t head_len = strlen (head);
-              size_t value_len = strlen (value);
-              size_t tail_len = strlen (tail + 1);
-              
-              tmp = xmalloc (head_len + value_len + tail_len + 2);
-              strcpy (tmp, head);
-              strcat (tmp, value);
-              
-              if (forced)
-                {
-                  if (c != ':')
-                    {
-                      as_bad (_("Missing forced substitution terminator ':'"));
-                      free (tmp);
-                      break;
-                    }
-                  ++tail;
-                }
-              else
-                *tail = c;
-              
-              strcat (tmp, tail);
-              ptr = tmp + head_len + value_len;
-              free (replacement);
-              head = replacement = tmp;
-              changed = 1;
-            }
-          else
-            *ptr = c;
         }
       else
-        ++ptr;
+        {
+          ++ptr;
+        }
     }
 
   if (changed)
@@ -5388,6 +5404,328 @@ subsym_substitute (char *line, int forced)
 
   free (replacement);
   return line;
+}
+
+static char *
+handle_symbol_substitution (char **ptr_ref, char **head_ref, char **replacement_ref,
+                            int forced, int eval_symbol, int *changed_ref)
+{
+  char *ptr = *ptr_ref;
+  char *head = *head_ref;
+  char *replacement = *replacement_ref;
+  char *name;
+  char *savedp = input_line_pointer;
+  int c;
+  subsym_ent_t *ent = NULL;
+  char *value = NULL;
+  char *tail;
+  int recurse = 1;
+
+  if (forced)
+    ++ptr;
+
+  input_line_pointer = ptr;
+  c = get_symbol_name (&name);
+  
+  if (c == '?')
+    {
+      *input_line_pointer++ = c;
+      c = *input_line_pointer;
+      *input_line_pointer = '\0';
+    }
+
+  if (str_hash_find (subsym_recurse_hash, name) == NULL)
+    {
+      ent = subsym_lookup (name, macro_level);
+      if (ent && !ent->isproc)
+        value = ent->u.s;
+    }
+  else
+    as_warn (_("%s symbol recursion stopped at second appearance of '%s'"),
+             forced ? "Forced substitution" : "Substitution", name);
+             
+  ptr = tail = input_line_pointer;
+  input_line_pointer = savedp;
+
+  if ((*name == '$' && ISDIGIT (name[1]) && name[2] == '\0') || 
+      name[strlen (name) - 1] == '?')
+    {
+      value = handle_local_label (name);
+      ptr = tail;
+    }
+  else if (ent != NULL && *name == '$')
+    {
+      value = handle_builtin_function (ent, &ptr, &tail, &c, &recurse);
+      if (value == NULL)
+        return NULL;
+    }
+
+  if (value != NULL && !eval_symbol)
+    {
+      char *result = apply_substitution (name, value, head, tail, c, 
+                                         forced, recurse);
+      if (result == NULL)
+        return NULL;
+        
+      *ptr_ref = result;
+      free (*replacement_ref);
+      *head_ref = *replacement_ref = result - (ptr - head);
+      *changed_ref = 1;
+      return *ptr_ref;
+    }
+  else
+    {
+      *ptr = c;
+    }
+    
+  *ptr_ref = ptr;
+  return ptr;
+}
+
+static char *
+handle_local_label (char *name)
+{
+  char *value = str_hash_find (local_label_hash[macro_level], name);
+  if (value == NULL)
+    {
+      char digit[11];
+      char *namecopy = xstrdup (name);
+      
+      value = strcpy (xmalloc (strlen (name) + sizeof (digit) + 1), name);
+      if (*value != '$')
+        value[strlen (value) - 1] = '\0';
+      sprintf (digit, ".%d", local_label_id++);
+      strcat (value, digit);
+      str_hash_insert (local_label_hash[macro_level], namecopy, value, 0);
+    }
+  return value;
+}
+
+static char *
+handle_builtin_function (subsym_ent_t *ent, char **ptr_ref, char **tail_ref, 
+                         int *c_ref, int *recurse_ref)
+{
+  char *ptr = *ptr_ref;
+  const subsym_proc_entry *entry = ent->u.p;
+  char *value = NULL;
+  
+  *ptr = *c_ref;
+  if (!ent->isproc)
+    {
+      as_bad (_("Unrecognized substitution symbol function"));
+      return NULL;
+    }
+  if (*ptr != '(')
+    {
+      as_bad (_("Missing '(' after substitution symbol function"));
+      return NULL;
+    }
+  ++ptr;
+  
+  if (ent->ismath)
+    {
+      value = handle_math_function (entry, &ptr);
+      if (value == NULL)
+        return NULL;
+      *recurse_ref = 0;
+    }
+  else
+    {
+      value = handle_string_function (entry, &ptr);
+      if (value == NULL)
+        return NULL;
+    }
+    
+  *tail_ref = ptr;
+  *c_ref = **tail_ref;
+  *ptr_ref = ptr;
+  return value;
+}
+
+static char *
+handle_math_function (const subsym_proc_entry *entry, char **ptr_ref)
+{
+  char *ptr = *ptr_ref;
+  float farg1, farg2 = 0;
+  char *value;
+  
+  farg1 = (float) strtod (ptr, &ptr);
+  if (entry->nargs == 2)
+    {
+      if (*ptr++ != ',')
+        {
+          as_bad (_("Expecting second argument"));
+          return NULL;
+        }
+      farg2 = (float) strtod (ptr, &ptr);
+    }
+    
+  value = XNEWVEC (char, 128);
+  if (entry->type == 2)
+    {
+      int result = (*entry->proc.i) (farg1, farg2);
+      sprintf (value, "%d", result);
+    }
+  else
+    {
+      float result = (*entry->proc.f) (farg1, farg2);
+      sprintf (value, "%f", result);
+    }
+    
+  if (*ptr++ != ')')
+    {
+      as_bad (_("Extra junk in function call, expecting ')'"));
+      free (value);
+      return NULL;
+    }
+    
+  *ptr_ref = ptr;
+  return value;
+}
+
+static char *
+handle_string_function (const subsym_proc_entry *entry, char **ptr_ref)
+{
+  char *ptr = *ptr_ref;
+  char *arg1 = NULL, *arg2 = NULL;
+  int arg_type[2] = { *ptr == '"', 0 };
+  int ismember = !strcmp (entry->name, "$ismember");
+  char *value;
+  int val;
+  
+  ptr = subsym_get_arg (ptr, ",)", &arg1, ismember);
+  if (!arg1)
+    return NULL;
+    
+  if (entry->nargs == 2)
+    {
+      if (*ptr++ != ',')
+        {
+          as_bad (_("Function expects two arguments"));
+          return NULL;
+        }
+      arg_type[1] = (ISDIGIT (*ptr)) ? 2 : (*ptr == '"');
+      ptr = subsym_get_arg (ptr, ")", &arg2, ismember);
+    }
+    
+  if ((!strcmp (entry->name, "$firstch") || !strcmp (entry->name, "$lastch")) 
+      && arg_type[1] != 2)
+    {
+      as_bad (_("Expecting character constant argument"));
+      return NULL;
+    }
+    
+  if (ismember && (arg_type[0] != 0 || arg_type[1] != 0))
+    {
+      as_bad (_("Both arguments must be substitution symbols"));
+      return NULL;
+    }
+    
+  if (*ptr++ != ')')
+    {
+      as_bad (_("Extra junk in function call, expecting ')'"));
+      return NULL;
+    }
+    
+  val = (*entry->proc.s) (arg1, arg2);
+  value = XNEWVEC (char, 64);
+  sprintf (value, "%d", val);
+  
+  *ptr_ref = ptr;
+  return value;
+}
+
+static char *
+apply_substitution (char *name, char *value, char *head, char *tail, 
+                   int c, int forced, int recurse)
+{
+  char *tmp;
+  char *savedp;
+  
+  if (recurse)
+    {
+      str_hash_insert (subsym_recurse_hash, name, name, 0);
+      value = subsym_substitute (value, macro_level > 0);
+      str_hash_delete (subsym_recurse_hash, name);
+    }
+    
+  *name = 0;
+  
+  if (forced)
+    {
+      if (c == '(')
+        {
+          value = handle_subscripted_substitution (value, &tail);
+          if (value == NULL)
+            return NULL;
+          c = *tail;
+        }
+      name[-1] = 0;
+    }
+    
+  tmp = xmalloc (strlen (head) + strlen (value) + strlen (tail + 1) + 2);
+  strcpy (tmp, head);
+  strcat (tmp, value);
+  
+  if (forced)
+    {
+      if (c != ':')
+        {
+          as_bad (_("Missing forced substitution terminator ':'"));
+          free (tmp);
+          return NULL;
+        }
+      ++tail;
+    }
+  else
+    *tail = c;
+    
+  strcat (tmp, tail);
+  return tmp + strlen (head) + strlen (value);
+}
+
+static char *
+handle_subscripted_substitution (char *value, char **tail_ref)
+{
+  char *tail = *tail_ref;
+  unsigned beg, len = 1;
+  char *newval = xstrdup (value);
+  char *savedp = input_line_pointer;
+  
+  input_line_pointer = tail + 1;
+  beg = get_absolute_expression ();
+  
+  if (beg < 1)
+    {
+      as_bad (_("Invalid subscript (use 1 to %d)"), (int) strlen (value));
+      free (newval);
+      return NULL;
+    }
+    
+  if (*input_line_pointer == ',')
+    {
+      ++input_line_pointer;
+      len = get_absolute_expression ();
+      if (beg + len > strlen (value))
+        {
+          as_bad (_("Invalid length (use 0 to %d)"), (int) strlen (value) - beg);
+          free (newval);
+          return NULL;
+        }
+    }
+    
+  newval += beg - 1;
+  newval[len] = 0;
+  *tail_ref = input_line_pointer;
+  
+  if (*(*tail_ref)++ != ')')
+    {
+      as_bad (_("Missing ')' in subscripted substitution symbol expression"));
+      return NULL;
+    }
+    
+  input_line_pointer = savedp;
+  return newval;
 }
 
 /* We use this to handle substitution symbols
@@ -5403,59 +5741,50 @@ tic54x_start_line_hook (void)
   char *line, *endp;
   char *replacement = NULL;
 
-  for (endp = input_line_pointer; *endp != 0; )
-    if (is_end_of_stmt (*endp++))
-      break;
+  for (endp = input_line_pointer; *endp != 0 && !is_end_of_stmt(*endp); endp++)
+    ;
+  if (*endp != 0)
+    endp++;
 
   line = xmemdup0 (input_line_pointer, endp - input_line_pointer);
-  if (!line)
-    return;
 
   parallel_on_next_line_hint = next_line_shows_parallel (endp);
 
-  if (macro_level > 0)
-    replacement = subsym_substitute (line, 1);
-  else
-    replacement = line;
-  
-  if (replacement)
-    replacement = subsym_substitute (replacement, 0);
+  replacement = subsym_substitute (line, macro_level > 0 ? 1 : 0);
+  if (replacement != line)
+    {
+      free (line);
+      line = replacement;
+    }
+  replacement = subsym_substitute (line, 0);
 
-  if (replacement && replacement != line)
+  if (replacement != line)
     {
       char *tmp = replacement;
       size_t len = strlen (replacement);
-      
-      if (len == 0)
-        {
-          free (replacement);
-          free (line);
-          substitution_line = 0;
-          return;
-        }
-
       char *comment = strchr (replacement, ';');
-      char endc = replacement[len - 1];
-      char *comment_pos;
+      char endc = len > 0 ? replacement[len - 1] : 0;
 
       if (comment != NULL)
-        {
-          comment[0] = endc;
-          comment[1] = 0;
-          comment_pos = comment - 1;
-        }
+	{
+	  *comment = endc;
+	  *(comment + 1) = 0;
+	  comment--;
+	}
+      else if (len > 0)
+	comment = replacement + len - 1;
       else
-        comment_pos = replacement + len - 1;
+	comment = replacement;
 
-      while (comment_pos >= replacement && is_whitespace (*comment_pos))
-        {
-          comment_pos[0] = endc;
-          comment_pos[1] = 0;
-          --comment_pos;
-        }
+      while (comment >= replacement && is_whitespace (*comment))
+	{
+	  *comment = endc;
+	  *(comment + 1) = 0;
+	  comment--;
+	}
 
-      while (tmp[0] && tmp[1] && is_whitespace (tmp[0]) && is_whitespace (tmp[1]))
-        ++tmp;
+      while (is_whitespace (tmp[0]) && is_whitespace (tmp[1]))
+	tmp++;
 
       input_line_pointer = endp;
       input_scrub_insert_line (tmp);
@@ -5473,162 +5802,139 @@ tic54x_start_line_hook (void)
 /* This is the guts of the machine-dependent assembler.  STR points to a
    machine dependent instruction.  This function is supposed to emit
    the frags/bytes it assembles to.  */
-void
-md_assemble (char *line)
-{
-  static int repeat_slot = 0;
-  static int delay_slots = 0;
-  static int is_parallel = 0;
-  static tic54x_insn insn;
-  char *lptr;
-  char *savedp = input_line_pointer;
-  int c;
+void md_assemble(char *line) {
+    static int repeat_slot = 0;
+    static int delay_slots = 0;
+    static int is_parallel = 0;
+    static tic54x_insn insn;
+    char *lptr;
+    char *savedp = input_line_pointer;
+    int c;
 
-  if (!line) {
-    return;
-  }
+    input_line_pointer = line;
+    c = get_symbol_name(&line);
 
-  input_line_pointer = line;
-  c = get_symbol_name (&line);
-
-  if (cpu == VNONE)
-    cpu = V542;
-  if (address_mode_needs_set)
-    {
-      set_address_mode (amode);
-      address_mode_needs_set = 0;
+    if (cpu == VNONE) {
+        cpu = V542;
     }
-  if (cpu_needs_set)
-    {
-      set_cpu (cpu);
-      cpu_needs_set = 0;
+    if (address_mode_needs_set) {
+        set_address_mode(amode);
+        address_mode_needs_set = 0;
     }
-  assembly_begun = 1;
+    if (cpu_needs_set) {
+        set_cpu(cpu);
+        cpu_needs_set = 0;
+    }
+    assembly_begun = 1;
 
-  if (is_parallel)
-    {
-      is_parallel = 0;
-      strncpy (insn.parmnemonic, line, sizeof(insn.parmnemonic) - 1);
-      insn.parmnemonic[sizeof(insn.parmnemonic) - 1] = '\0';
-      lptr = input_line_pointer;
-      *lptr = c;
-      input_line_pointer = savedp;
+    if (is_parallel) {
+        is_parallel = 0;
+        strcpy(insn.parmnemonic, line);
+        lptr = input_line_pointer;
+        *lptr = c;
+        input_line_pointer = savedp;
 
-      if (tic54x_parse_parallel_insn_lastline (&insn, lptr))
-	{
-	  int words = build_insn (&insn);
-	  if (delay_slots != 0)
-	    {
-	      if (words > delay_slots)
-		{
-		  as_bad (ngettext ("Instruction does not fit in available "
-				    "delay slots (%d-word insn, %d slot left)",
-				    "Instruction does not fit in available "
-				    "delay slots (%d-word insn, %d slots left)",
-				    delay_slots),
-			  words, delay_slots);
-		  delay_slots = 0;
-		  return;
-		}
-	      delay_slots -= words;
-	    }
-	}
-      return;
+        if (tic54x_parse_parallel_insn_lastline(&insn, lptr)) {
+            int words = build_insn(&insn);
+            if (delay_slots != 0 && words > delay_slots) {
+                as_bad(ngettext("Instruction does not fit in available "
+                               "delay slots (%d-word insn, %d slot left)",
+                               "Instruction does not fit in available "
+                               "delay slots (%d-word insn, %d slots left)",
+                               delay_slots),
+                      words, delay_slots);
+                delay_slots = 0;
+                return;
+            }
+            if (delay_slots != 0) {
+                delay_slots -= words;
+            }
+        }
+        return;
     }
 
-  memset (&insn, 0, sizeof (insn));
-  strncpy (insn.mnemonic, line, sizeof(insn.mnemonic) - 1);
-  insn.mnemonic[sizeof(insn.mnemonic) - 1] = '\0';
-  lptr = input_line_pointer;
-  *lptr = c;
-  input_line_pointer = savedp;
+    memset(&insn, 0, sizeof(insn));
+    strcpy(insn.mnemonic, line);
+    lptr = input_line_pointer;
+    *lptr = c;
+    input_line_pointer = savedp;
 
-  char *parallel_marker = strstr (line, "||");
-  if (parallel_marker != NULL || parallel_on_next_line_hint)
-    {
-      if (parallel_marker != NULL)
-	*parallel_marker = '\0';
+    char *parallel_marker = strstr(line, "||");
+    if (parallel_marker != NULL || parallel_on_next_line_hint) {
+        if (parallel_marker != NULL) {
+            *parallel_marker = '\0';
+        }
 
-      if (tic54x_parse_parallel_insn_firstline (&insn, lptr))
-	{
-	  is_parallel = 1;
-	  if (parallel_marker != NULL)
-	    {
-	      char *tmp = parallel_marker;
-	      while (is_whitespace (tmp[2]))
-		++tmp;
-	      md_assemble (tmp + 2);
-	    }
-	}
-      else
-	{
-	  as_bad (_("Unrecognized parallel instruction '%s'"), line);
-	}
-      return;
+        if (tic54x_parse_parallel_insn_firstline(&insn, lptr)) {
+            is_parallel = 1;
+            if (parallel_marker != NULL) {
+                char *next_line = parallel_marker + 2;
+                while (is_whitespace(*next_line)) {
+                    next_line++;
+                }
+                md_assemble(next_line);
+            }
+        } else {
+            as_bad(_("Unrecognized parallel instruction '%s'"), line);
+        }
+        return;
     }
 
-  if (tic54x_parse_insn (&insn, lptr))
-    {
-      int words;
+    if (!tic54x_parse_insn(&insn, lptr)) {
+        return;
+    }
 
-      if ((insn.tm->flags & FL_LP) && cpu != V545LP && cpu != V546LP)
-	{
-	  as_bad (_("Instruction '%s' requires an LP cpu version"), insn.tm->name);
-	  return;
-	}
-      if ((insn.tm->flags & FL_FAR) && amode != far_mode)
-	{
-	  as_bad (_("Instruction '%s' requires far mode addressing"), insn.tm->name);
-	  return;
-	}
+    if ((insn.tm->flags & FL_LP) && cpu != V545LP && cpu != V546LP) {
+        as_bad(_("Instruction '%s' requires an LP cpu version"), insn.tm->name);
+        return;
+    }
 
-      words = build_insn (&insn);
+    if ((insn.tm->flags & FL_FAR) && amode != far_mode) {
+        as_bad(_("Instruction '%s' requires far mode addressing"), insn.tm->name);
+        return;
+    }
 
-      if (delay_slots)
-	{
-	  if (words > delay_slots)
-	    {
-	      as_warn (ngettext ("Instruction does not fit in available "
-				 "delay slots (%d-word insn, %d slot left). "
-				 "Resulting behavior is undefined.",
-				 "Instruction does not fit in available "
-				 "delay slots (%d-word insn, %d slots left). "
-				 "Resulting behavior is undefined.",
-				 delay_slots),
-		       words, delay_slots);
-	      delay_slots = 0;
-	      return;
-	    }
-	  if (insn.tm->flags & FL_BMASK)
-	    {
-	      as_warn (_("Instructions which cause PC discontinuity are not "
-			 "allowed in a delay slot. "
-			 "Resulting behavior is undefined."));
-	    }
-	  delay_slots -= words;
-	}
+    int words = build_insn(&insn);
 
-      if (repeat_slot)
-	{
-	  if (insn.tm->flags & FL_NR)
-	    as_warn (_("'%s' is not repeatable. "
-		       "Resulting behavior is undefined."),
-		     insn.tm->name);
-	  else if (insn.is_lkaddr)
-	    as_warn (_("Instructions using long offset modifiers or absolute "
-		       "addresses are not repeatable. "
-		       "Resulting behavior is undefined."));
-	  repeat_slot = 0;
-	}
+    if (delay_slots) {
+        if (words > delay_slots) {
+            as_warn(ngettext("Instruction does not fit in available "
+                            "delay slots (%d-word insn, %d slot left). "
+                            "Resulting behavior is undefined.",
+                            "Instruction does not fit in available "
+                            "delay slots (%d-word insn, %d slots left). "
+                            "Resulting behavior is undefined.",
+                            delay_slots),
+                   words, delay_slots);
+            delay_slots = 0;
+            return;
+        }
+        if (insn.tm->flags & FL_BMASK) {
+            as_warn(_("Instructions which cause PC discontinuity are not "
+                     "allowed in a delay slot. "
+                     "Resulting behavior is undefined."));
+        }
+        delay_slots -= words;
+    }
 
-      if (insn.tm->flags & B_REPEAT)
-	{
-	  repeat_slot = 1;
-	}
-      if (insn.tm->flags & FL_DELAY)
-	{
-	  delay_slots = 2;
-	}
+    if (repeat_slot) {
+        if (insn.tm->flags & FL_NR) {
+            as_warn(_("'%s' is not repeatable. "
+                     "Resulting behavior is undefined."),
+                   insn.tm->name);
+        } else if (insn.is_lkaddr) {
+            as_warn(_("Instructions using long offset modifiers or absolute "
+                     "addresses are not repeatable. "
+                     "Resulting behavior is undefined."));
+        }
+        repeat_slot = 0;
+    }
+
+    if (insn.tm->flags & B_REPEAT) {
+        repeat_slot = 1;
+    }
+    if (insn.tm->flags & FL_DELAY) {
+        delay_slots = 2;
     }
 }
 
@@ -5638,14 +5944,16 @@ md_assemble (char *line)
 void
 tic54x_adjust_symtab (void)
 {
-  if (symbol_rootP == NULL || S_GET_STORAGE_CLASS (symbol_rootP) != C_FILE)
+  if (symbol_rootP != NULL && S_GET_STORAGE_CLASS (symbol_rootP) == C_FILE)
     {
-      unsigned lineno;
-      const char *filename = as_where (&lineno);
-      if (filename != NULL)
-        {
-          c_dot_file_symbol (filename);
-        }
+      return;
+    }
+  
+  unsigned lineno;
+  const char * filename = as_where (&lineno);
+  if (filename != NULL)
+    {
+      c_dot_file_symbol (filename);
     }
 }
 
@@ -5653,10 +5961,9 @@ tic54x_adjust_symtab (void)
    this function returns true if a | is found in a line.
    This lets us process parallel instructions, which span two lines.  */
 
-int
-tic54x_unrecognized_line (int c)
+int tic54x_unrecognized_line(int c)
 {
-  return (c == PARALLEL_SEPARATOR) ? 1 : 0;
+    return c == PARALLEL_SEPARATOR;
 }
 
 /* Watch for local labels of the form $[0-9] and [_a-zA-Z][_a-zA-Z0-9]*?
@@ -5667,35 +5974,59 @@ tic54x_unrecognized_line (int c)
 void
 tic54x_define_label (symbolS *sym)
 {
-  if (sym == NULL) {
-    return;
+  if (sym != NULL)
+  {
+    last_label_seen = sym;
   }
-  
-  last_label_seen = sym;
 }
 
 /* Try to parse something that normal parsing failed at.  */
 
 symbolS *
-tic54x_undefined_symbol(char *name)
+tic54x_undefined_symbol (char *name)
 {
   tic54x_symbol *sym = NULL;
   
-  if (!name)
+  if (name == NULL) {
     return NULL;
+  }
 
-  if ((sym = str_hash_find(cc_hash, name)) != NULL ||
-      (sym = str_hash_find(cc2_hash, name)) != NULL ||
-      (sym = str_hash_find(cc3_hash, name)) != NULL ||
-      str_hash_find(misc_symbol_hash, name) != NULL ||
-      (sym = str_hash_find(sbit_hash, name)) != NULL ||
-      (sym = str_hash_find(reg_hash, name)) != NULL ||
-      (sym = str_hash_find(mmreg_hash, name)) != NULL ||
-      strcasecmp(name, "a") == 0 ||
-      strcasecmp(name, "b") == 0)
-  {
-    return symbol_new(name, reg_section, &zero_address_frag,
-                      sym ? sym->value : 0);
+  sym = str_hash_find (cc_hash, name);
+  if (sym != NULL) {
+    return symbol_new (name, reg_section, &zero_address_frag, sym->value);
+  }
+
+  sym = str_hash_find (cc2_hash, name);
+  if (sym != NULL) {
+    return symbol_new (name, reg_section, &zero_address_frag, sym->value);
+  }
+
+  sym = str_hash_find (cc3_hash, name);
+  if (sym != NULL) {
+    return symbol_new (name, reg_section, &zero_address_frag, sym->value);
+  }
+
+  if (str_hash_find (misc_symbol_hash, name) != NULL) {
+    return symbol_new (name, reg_section, &zero_address_frag, 0);
+  }
+
+  sym = str_hash_find (sbit_hash, name);
+  if (sym != NULL) {
+    return symbol_new (name, reg_section, &zero_address_frag, sym->value);
+  }
+
+  sym = str_hash_find (reg_hash, name);
+  if (sym != NULL) {
+    return symbol_new (name, reg_section, &zero_address_frag, sym->value);
+  }
+
+  sym = str_hash_find (mmreg_hash, name);
+  if (sym != NULL) {
+    return symbol_new (name, reg_section, &zero_address_frag, sym->value);
+  }
+
+  if (strcasecmp (name, "a") == 0 || strcasecmp (name, "b") == 0) {
+    return symbol_new (name, reg_section, &zero_address_frag, 0);
   }
 
   return NULL;
@@ -5704,22 +6035,17 @@ tic54x_undefined_symbol(char *name)
 /* Parse a name in an expression before the expression parser takes a stab at
    it.  */
 
-int
-tic54x_parse_name (char *name, expressionS *expn)
+int tic54x_parse_name(char *name ATTRIBUTE_UNUSED, expressionS *expn ATTRIBUTE_UNUSED)
 {
-  (void)name;
-  (void)expn;
-  return 0;
+    return 0;
 }
 
-const char *
-md_atof (int type, char *literalP, int *sizeP)
+const char *md_atof(int type, char *literalP, int *sizeP)
 {
-  if (!literalP || !sizeP) {
-    return "Invalid parameter";
-  }
-  
-  return ieee_md_atof (type, literalP, sizeP, true);
+    if (literalP == NULL || sizeP == NULL) {
+        return NULL;
+    }
+    return ieee_md_atof(type, literalP, sizeP, true);
 }
 
 arelent *
@@ -5728,41 +6054,64 @@ tc_gen_reloc (asection *section, fixS *fixP)
   arelent *rel;
   bfd_reloc_code_real_type code;
   asymbol *sym;
-  const char *name;
+  const char *sym_name;
+  const char *section_name;
 
-  if (!fixP || !section)
+  if (fixP == NULL || section == NULL) {
     return NULL;
+  }
+
+  if (fixP->fx_addsy == NULL) {
+    return NULL;
+  }
 
   code = fixP->fx_r_type;
   sym = symbol_get_bfdsym (fixP->fx_addsy);
-  if (!sym)
+  
+  if (sym == NULL) {
     return NULL;
+  }
 
   rel = notes_alloc (sizeof (arelent));
-  if (!rel)
+  if (rel == NULL) {
     return NULL;
+  }
 
   rel->sym_ptr_ptr = notes_alloc (sizeof (asymbol *));
-  if (!rel->sym_ptr_ptr)
+  if (rel->sym_ptr_ptr == NULL) {
     return NULL;
+  }
 
   *rel->sym_ptr_ptr = sym;
+  
+  if (fixP->fx_frag == NULL) {
+    return NULL;
+  }
+  
   rel->address = fixP->fx_frag->fr_address + fixP->fx_where;
   rel->address /= OCTETS_PER_BYTE;
+  
   rel->howto = bfd_reloc_type_lookup (stdoutput, code);
-
-  if (sym->name && section->name && !strcmp (sym->name, section->name))
-    rel->howto += HOWTO_BANK;
-
-  if (!rel->howto)
-    {
-      name = S_GET_NAME (fixP->fx_addsy);
-      if (!name)
-        name = "<unknown>";
-      as_fatal ("Cannot generate relocation type for symbol %s, code %s",
-                name, bfd_get_reloc_code_name (code));
-      return NULL;
+  
+  sym_name = sym->name;
+  section_name = section->name;
+  
+  if (sym_name != NULL && section_name != NULL) {
+    if (strcmp (sym_name, section_name) == 0) {
+      rel->howto += HOWTO_BANK;
     }
+  }
+
+  if (rel->howto == NULL) {
+    const char *name = S_GET_NAME (fixP->fx_addsy);
+    if (name == NULL) {
+      name = "<unknown>";
+    }
+    as_fatal ("Cannot generate relocation type for symbol %s, code %s",
+              name, bfd_get_reloc_code_name (code));
+    return NULL;
+  }
+  
   return rel;
 }
 
@@ -5774,14 +6123,22 @@ tic54x_cons_fix_new (fragS *frag, int where, int octets, expressionS *expn,
 {
   bfd_reloc_code_real_type reloc_type;
   
-  if (octets == 2) {
-    reloc_type = BFD_RELOC_TIC54X_16_OF_23;
-  } else if (octets == 4) {
-    reloc_type = emitting_long ? BFD_RELOC_TIC54X_23 : BFD_RELOC_32;
-  } else {
-    as_bad (_("Unsupported relocation size %d"), octets);
-    reloc_type = BFD_RELOC_TIC54X_16_OF_23;
-  }
+  if (octets == 2)
+    {
+      reloc_type = BFD_RELOC_TIC54X_16_OF_23;
+    }
+  else if (octets == 4)
+    {
+      if (emitting_long)
+        reloc_type = BFD_RELOC_TIC54X_23;
+      else
+        reloc_type = BFD_RELOC_32;
+    }
+  else
+    {
+      as_bad (_("Unsupported relocation size %d"), octets);
+      reloc_type = BFD_RELOC_TIC54X_16_OF_23;
+    }
   
   fix_new_exp (frag, where, octets, expn, 0, reloc_type);
 }
@@ -5794,22 +6151,22 @@ tic54x_cons_fix_new (fragS *frag, int where, int octets, expressionS *expn,
 void
 md_apply_fix (fixS *fixP, valueT *valP, segT seg ATTRIBUTE_UNUSED)
 {
-  char *buf;
-  valueT val;
-  valueT existing_val;
-
   if (!fixP || !valP || !fixP->fx_frag) {
-    as_fatal ("Invalid parameters to md_apply_fix");
     return;
   }
 
-  buf = fixP->fx_where + fixP->fx_frag->fr_literal;
-  val = *valP;
+  char *buf = fixP->fx_where + fixP->fx_frag->fr_literal;
+  valueT val = *valP;
+  bfd_vma existing_value;
 
   switch (fixP->fx_r_type)
     {
     case BFD_RELOC_TIC54X_MS7_OF_23:
       val = (val >> 16) & 0x7F;
+      bfd_put_16 (stdoutput, val, buf);
+      *valP = val & 0xFFFF;
+      break;
+
     case BFD_RELOC_TIC54X_16_OF_23:
     case BFD_RELOC_16:
       bfd_put_16 (stdoutput, val, buf);
@@ -5817,20 +6174,20 @@ md_apply_fix (fixS *fixP, valueT *valP, segT seg ATTRIBUTE_UNUSED)
       break;
 
     case BFD_RELOC_TIC54X_PARTLS7:
-      existing_val = bfd_get_16 (stdoutput, buf);
-      bfd_put_16 (stdoutput, (existing_val & 0xFF80) | (val & 0x7F), buf);
+      existing_value = bfd_get_16 (stdoutput, buf);
+      bfd_put_16 (stdoutput, (existing_value & 0xFF80) | (val & 0x7F), buf);
       *valP = val & 0x7F;
       break;
 
     case BFD_RELOC_TIC54X_PARTMS9:
-      existing_val = bfd_get_16 (stdoutput, buf);
-      bfd_put_16 (stdoutput, (existing_val & 0xFE00) | (val >> 7), buf);
+      existing_value = bfd_get_16 (stdoutput, buf);
+      bfd_put_16 (stdoutput, (existing_value & 0xFE00) | (val >> 7), buf);
       break;
 
     case BFD_RELOC_32:
     case BFD_RELOC_TIC54X_23:
-      existing_val = bfd_get_32 (stdoutput, buf);
-      bfd_put_32 (stdoutput, (existing_val & 0xFF800000) | val, buf);
+      existing_value = bfd_get_32 (stdoutput, buf);
+      bfd_put_32 (stdoutput, (existing_value & 0xFF800000) | val, buf);
       break;
 
     default:
@@ -5838,52 +6195,51 @@ md_apply_fix (fixS *fixP, valueT *valP, segT seg ATTRIBUTE_UNUSED)
       return;
     }
 
-  if (fixP->fx_addsy == NULL && fixP->fx_pcrel == 0)
+  if (!fixP->fx_addsy && !fixP->fx_pcrel) {
     fixP->fx_done = 1;
+  }
 }
 
 /* This is our chance to record section alignment
    don't need to do anything here, since BFD does the proper encoding.  */
 
 valueT
-md_section_align (segT segment, valueT section_size)
+md_section_align (segT segment ATTRIBUTE_UNUSED, valueT section_size)
 {
-  (void)segment;
   return section_size;
 }
 
 long
-md_pcrel_from (fixS *fixP)
+md_pcrel_from (fixS *fixP ATTRIBUTE_UNUSED)
 {
-  (void)fixP;
   return 0;
 }
 
 /* Mostly little-endian, but longwords (4 octets) get MS word stored
    first.  */
 
-void
-tic54x_number_to_chars (char *buf, valueT val, int n)
+void tic54x_number_to_chars(char *buf, valueT val, int n)
 {
-  if (buf == NULL || n <= 0)
-    return;
+    if (buf == NULL || n <= 0) {
+        return;
+    }
     
-  if (n != 4)
-    {
-      number_to_chars_littleendian (buf, val, n);
+    if (n != 4) {
+        number_to_chars_littleendian(buf, val, n);
+        return;
     }
-  else
-    {
-      number_to_chars_littleendian (buf, val >> 16, 2);
-      number_to_chars_littleendian (buf + 2, val & 0xFFFF, 2);
-    }
+    
+    const valueT high_word = val >> 16;
+    const valueT low_word = val & 0xFFFF;
+    
+    number_to_chars_littleendian(buf, high_word, 2);
+    number_to_chars_littleendian(buf + 2, low_word, 2);
 }
 
 int
-tic54x_estimate_size_before_relax (fragS *frag, segT seg)
+tic54x_estimate_size_before_relax (fragS *frag ATTRIBUTE_UNUSED,
+				   segT seg ATTRIBUTE_UNUSED)
 {
-  (void)frag;
-  (void)seg;
   return 0;
 }
 
@@ -5895,12 +6251,14 @@ tic54x_relax_frag (fragS *frag, long stretch ATTRIBUTE_UNUSED)
 {
   symbolS *sym = frag->fr_symbol;
   int growth = 0;
-  int i;
 
   if (sym == NULL)
     return growth;
 
   struct bit_info *bi = (struct bit_info *) frag->fr_opcode;
+  if (bi == NULL)
+    return growth;
+
   int bit_offset = frag_bit_offset (frag_prev (frag, bi->seg), bi->seg);
   int size = S_GET_VALUE (sym);
   fragS *prev_frag = bit_offset_frag (frag_prev (frag, bi->seg), bi->seg);
@@ -5914,12 +6272,19 @@ tic54x_relax_frag (fragS *frag, long stretch ATTRIBUTE_UNUSED)
 
   if (size < 0)
     {
-      const char *type_name = (bi->type == TYPE_SPACE) ? ".space" :
-                              (bi->type == TYPE_BES) ? ".bes" : ".field";
+      const char *type_name = ".field";
+      if (bi->type == TYPE_SPACE)
+        type_name = ".space";
+      else if (bi->type == TYPE_BES)
+        type_name = ".bes";
+      
       as_warn (_("negative value ignored in %s"), type_name);
-      growth = 0;
-      frag->tc_frag_data = frag->fr_fix = 0;
-      goto cleanup;
+      frag->tc_frag_data = 0;
+      frag->fr_fix = 0;
+      frag->fr_symbol = NULL;
+      frag->fr_opcode = NULL;
+      free (bi);
+      return 0;
     }
 
   if (bi->type == TYPE_FIELD)
@@ -5935,10 +6300,10 @@ tic54x_relax_frag (fragS *frag, long stretch ATTRIBUTE_UNUSED)
           prev_frag->tc_frag_data += size;
           if (prev_frag->tc_frag_data == 16)
             prev_frag->tc_frag_data = 0;
-            
+          
           if (bi->sym)
             symbol_set_frag (bi->sym, prev_frag);
-            
+          
           growth = -frag->fr_fix;
           frag->fr_fix = 0;
           frag->tc_frag_data = 0;
@@ -5952,7 +6317,7 @@ tic54x_relax_frag (fragS *frag, long stretch ATTRIBUTE_UNUSED)
           frag->tc_frag_data = size;
           if (frag->tc_frag_data == 16)
             frag->tc_frag_data = 0;
-            
+          
           growth = 0;
         }
     }
@@ -5965,62 +6330,72 @@ tic54x_relax_frag (fragS *frag, long stretch ATTRIBUTE_UNUSED)
               prev_frag->tc_frag_data += size;
               if (prev_frag->tc_frag_data == 16)
                 prev_frag->tc_frag_data = 0;
-                
+              
               if (bi->sym)
                 symbol_set_frag (bi->sym, prev_frag);
-                
+              
               growth = -frag->fr_fix;
               frag->fr_fix = 0;
               frag->tc_frag_data = 0;
-              goto cleanup;
             }
-          if (bi->type == TYPE_SPACE && bi->sym)
-            symbol_set_frag (bi->sym, prev_frag);
-          size -= available;
+          else
+            {
+              if (bi->type == TYPE_SPACE && bi->sym)
+                symbol_set_frag (bi->sym, prev_frag);
+              size -= available;
+              
+              growth = (size + 15) / 16 * OCTETS_PER_BYTE - frag->fr_fix;
+              int i;
+              for (i = 0; i < growth && i < (int)sizeof(frag->fr_literal); i++)
+                frag->fr_literal[i] = 0;
+              frag->fr_fix = growth;
+              frag->tc_frag_data = size % 16;
+              
+              if (bi->type == TYPE_BES && bi->sym)
+                S_SET_VALUE (bi->sym, frag->fr_fix / OCTETS_PER_BYTE - 1);
+            }
         }
-      
-      growth = (size + 15) / 16 * OCTETS_PER_BYTE - frag->fr_fix;
-      for (i = 0; i < growth; i++)
-        frag->fr_literal[i] = 0;
-      frag->fr_fix = growth;
-      frag->tc_frag_data = size % 16;
-      
-      if (bi->type == TYPE_BES && bi->sym)
-        S_SET_VALUE (bi->sym, frag->fr_fix / OCTETS_PER_BYTE - 1);
+      else
+        {
+          growth = (size + 15) / 16 * OCTETS_PER_BYTE - frag->fr_fix;
+          int i;
+          for (i = 0; i < growth && i < (int)sizeof(frag->fr_literal); i++)
+            frag->fr_literal[i] = 0;
+          frag->fr_fix = growth;
+          frag->tc_frag_data = size % 16;
+          
+          if (bi->type == TYPE_BES && bi->sym)
+            S_SET_VALUE (bi->sym, frag->fr_fix / OCTETS_PER_BYTE - 1);
+        }
     }
 
-cleanup:
-  frag->fr_symbol = 0;
-  frag->fr_opcode = 0;
-  free ((void *) bi);
+  frag->fr_symbol = NULL;
+  frag->fr_opcode = NULL;
+  free (bi);
   
   return growth;
 }
 
 void
 tic54x_convert_frag (bfd *abfd ATTRIBUTE_UNUSED,
-		     segT seg ATTRIBUTE_UNUSED,
-		     fragS *frag)
+                     segT seg ATTRIBUTE_UNUSED,
+                     fragS *frag)
 {
-  if (!frag || !frag->fr_next) {
+  if (frag == NULL || frag->fr_next == NULL) {
     return;
   }
-  
+
   if (frag->fr_var == 0) {
-    as_bad_where (frag->fr_file, frag->fr_line,
-		  _("invalid fragment variable (zero division)"));
     return;
   }
-  
-  frag->fr_offset = (frag->fr_next->fr_address
-		     - frag->fr_address
-		     - frag->fr_fix) / frag->fr_var;
+
+  long offset_bytes = frag->fr_next->fr_address - frag->fr_address - frag->fr_fix;
+  frag->fr_offset = offset_bytes / frag->fr_var;
   
   if (frag->fr_offset < 0) {
     as_bad_where (frag->fr_file, frag->fr_line,
-		  _("attempt to .space/.bes backwards? (%ld)"),
-		  (long) frag->fr_offset);
-    return;
+                  _("attempt to .space/.bes backwards? (%ld)"),
+                  (long) frag->fr_offset);
   }
   
   frag->fr_type = rs_space;
@@ -6037,7 +6412,7 @@ int
 tic54x_start_label (char * label_start, int nul_char, int next_char)
 {
   char *rest;
-
+  
   if (current_stag != NULL)
     return 0;
 
@@ -6053,18 +6428,33 @@ tic54x_start_label (char * label_start, int nul_char, int next_char)
   rest = input_line_pointer;
   if (nul_char == '"')
     ++rest;
+    
   while (is_whitespace (next_char))
     next_char = *++rest;
+    
   if (next_char != '.')
     return 1;
 
-  if ((strncasecmp (rest, ".tag", 4) == 0 && is_whitespace (rest[4])) ||
-      (strncasecmp (rest, ".struct", 7) == 0 && is_whitespace (rest[7])) ||
-      (strncasecmp (rest, ".union", 6) == 0 && is_whitespace (rest[6])) ||
-      (strncasecmp (rest, ".macro", 6) == 0 && is_whitespace (rest[6])) ||
-      (strncasecmp (rest, ".set", 4) == 0 && is_whitespace (rest[4])) ||
-      (strncasecmp (rest, ".equ", 4) == 0 && is_whitespace (rest[4])))
-    return 0;
-
+  typedef struct {
+    const char *keyword;
+    size_t len;
+  } keyword_entry;
+  
+  static const keyword_entry keywords[] = {
+    {".tag", 4},
+    {".struct", 7},
+    {".union", 6},
+    {".macro", 6},
+    {".set", 4},
+    {".equ", 4}
+  };
+  
+  for (size_t i = 0; i < sizeof(keywords) / sizeof(keywords[0]); i++)
+    {
+      if (strncasecmp (rest, keywords[i].keyword, keywords[i].len) == 0 
+          && is_whitespace (rest[keywords[i].len]))
+        return 0;
+    }
+    
   return 1;
 }
